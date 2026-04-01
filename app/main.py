@@ -364,6 +364,9 @@ def api_manual_search():
                 "last_update": row.get("Last Update", ""),
                 "unsubscribed": row.get("Unsubscribed", False),
                 "assignments": asns,
+                # Full row included so the frontend can populate dynamic fields
+                # (e.g. file fields) without knowing the schema in advance
+                "_raw_row": {k: v for k, v in row.items() if k != "id"},
             })
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -472,6 +475,7 @@ def validate_page():
                 "name": r.get("Position Name", ""),
                 "row_id": r.get("id"),
                 "assignment_count": pos_counts.get(r.get("Position Name", ""), 0),
+                "raw": {k: v for k, v in r.items() if k != "id"},
             }
             for r in pos_rows if r.get("Position Name")
         ], key=lambda x: x["name"].lower())
@@ -481,6 +485,7 @@ def validate_page():
                 "name": r.get("Unit Name", ""),
                 "row_id": r.get("id"),
                 "assignment_count": unit_counts.get(r.get("Unit Name", ""), 0),
+                "raw": {k: v for k, v in r.items() if k != "id"},
             }
             for r in unit_rows if r.get("Unit Name")
         ], key=lambda x: x["name"].lower())
@@ -559,6 +564,97 @@ def history_page():
     except Exception:
         pass
     return render_template("history.html", rows=rows)
+
+
+# ------------------------------------------------------------------ #
+# Generic file upload proxy + dynamic field/row endpoints
+# ------------------------------------------------------------------ #
+
+# Field types the app knows how to render as editable inputs.
+# Everything else (link_row, formula, rollup, etc.) is skipped.
+_EDITABLE_FIELD_TYPES = {
+    "text", "long_text", "number", "boolean", "date",
+    "url", "email", "phone_number", "file",
+    "single_select", "multiple_select", "rating",
+}
+
+_TABLE_KEY_MAP = {
+    "contacts":    "table_contacts",
+    "units":       "table_units",
+    "positions":   "table_positions",
+    "assignments": "table_assignments",
+}
+
+
+@app.route("/api/files/upload", methods=["POST"])
+def api_files_upload():
+    """Proxy a file upload to Baserow's user-files endpoint."""
+    if "file" not in request.files:
+        return jsonify(error="No file provided."), 400
+    f = request.files["file"]
+    mime = f.mimetype or "application/octet-stream"
+    try:
+        client = _make_client()
+        result = client.upload_file(f.stream, f.filename, mime)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(result)
+
+
+@app.route("/api/table-fields/<table_key>")
+def api_table_fields(table_key):
+    """
+    Return editable field definitions for a table.
+    Skips primary field, link_row, formula, and other uneditable types.
+    """
+    cfg_key = _TABLE_KEY_MAP.get(table_key)
+    if not cfg_key:
+        return jsonify(error=f"Unknown table key: {table_key}"), 400
+    c = cfg.load_config()
+    table_id = c.get(cfg_key)
+    if not table_id:
+        return jsonify(error="Table not configured."), 400
+    try:
+        client = _make_client()
+        fields = client.get_fields(int(table_id))
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    editable = [
+        {
+            "id":      f["id"],
+            "name":    f["name"],
+            "type":    f["type"],
+            "primary": f.get("primary", False),
+            # single_select / multiple_select options
+            "options": [
+                {"id": o["id"], "value": o["value"], "color": o.get("color", "")}
+                for o in f.get("select_options", [])
+            ],
+        }
+        for f in fields
+        if f["type"] in _EDITABLE_FIELD_TYPES
+    ]
+    return jsonify(fields=editable)
+
+
+@app.route("/api/table-row/<table_key>/<int:row_id>", methods=["PATCH"])
+def api_table_row_update(table_key, row_id):
+    """Update a single row in any configured table."""
+    cfg_key = _TABLE_KEY_MAP.get(table_key)
+    if not cfg_key:
+        return jsonify(error=f"Unknown table key: {table_key}"), 400
+    c = cfg.load_config()
+    table_id = c.get(cfg_key)
+    if not table_id:
+        return jsonify(error="Table not configured."), 400
+    body = request.get_json(force=True) or {}
+    try:
+        client = _make_client()
+        updated = client.update_row(int(table_id), row_id, body)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(updated)
 
 
 # ------------------------------------------------------------------ #

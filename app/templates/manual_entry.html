@@ -70,6 +70,8 @@
               </div>
             </div>
           </div>
+          <!-- Dynamic file fields injected here by JS if present on the contacts table -->
+          <div id="dynamic-file-fields" class="row g-3 mt-0"></div>
         </div>
       </div>
 
@@ -239,5 +241,114 @@ document.getElementById("contact-form").addEventListener("submit", async e => {
   document.getElementById("contact-row-id").value = data.row_id || "";
   showToast("Contact saved successfully.", "success");
 });
+
+// ── Dynamic file fields on contacts table ─────────────────────
+// Keyed by field name → staged Baserow file object
+const _contactStagedFiles = {};
+
+async function loadContactFileFields(rowData = {}) {
+  const container = document.getElementById("dynamic-file-fields");
+  container.innerHTML = "";
+  Object.keys(_contactStagedFiles).forEach(k => delete _contactStagedFiles[k]);
+
+  const r = await fetch("/api/table-fields/contacts");
+  if (!r.ok) return;
+  const { fields } = await r.json();
+  const fileFields = fields.filter(f => f.type === "file" && !f.primary);
+  if (!fileFields.length) return;
+
+  fileFields.forEach(field => {
+    const currentVal = rowData[field.name] || [];
+    const div = document.createElement("div");
+    div.className = "col-md-6";
+    div.innerHTML = `
+      <label class="form-label small fw-semibold">${field.name}</label>
+      ${renderContactFileWidget(field, currentVal)}`;
+    container.appendChild(div);
+    document.getElementById(`cf-input-${field.id}`)
+      ?.addEventListener("change", e => stageContactFile(field, e.target.files[0]));
+  });
+}
+
+function renderContactFileWidget(field, files) {
+  let preview = "";
+  if (files.length) {
+    preview = files.map(f => {
+      if (f.is_image) {
+        const thumb = f.thumbnails?.small?.url || f.url;
+        return `<a href="${f.url}" target="_blank" class="me-1">
+                  <img src="${thumb}" style="max-height:56px;border-radius:4px;" title="${f.visible_name || f.name}">
+                </a>`;
+      }
+      return `<a href="${f.url}" target="_blank" class="badge bg-secondary me-1 text-decoration-none">${f.visible_name || f.name}</a>`;
+    }).join("");
+    preview = `<div id="cf-preview-${field.id}" class="mb-1 d-flex flex-wrap gap-1 align-items-center">${preview}</div>`;
+  }
+  return `${preview}
+    <div class="d-flex align-items-center gap-2">
+      <input type="file" class="form-control form-control-sm" id="cf-input-${field.id}" accept="*/*">
+      <span id="cf-status-${field.id}" class="small text-muted"></span>
+    </div>`;
+}
+
+async function stageContactFile(field, file) {
+  if (!file) return;
+  const statusEl = document.getElementById(`cf-status-${field.id}`);
+  statusEl.textContent = "Uploading…";
+  statusEl.className = "small text-muted";
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const resp = await fetch("/api/files/upload", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Upload failed");
+    _contactStagedFiles[field.name] = data;
+    statusEl.textContent = `✓ ${data.visible_name || data.name}`;
+    statusEl.className = "small text-success";
+    if (data.is_image) {
+      const thumb = data.thumbnails?.small?.url || data.url;
+      let prev = document.getElementById(`cf-preview-${field.id}`);
+      if (!prev) {
+        prev = document.createElement("div");
+        prev.id = `cf-preview-${field.id}`;
+        prev.className = "mb-1 d-flex flex-wrap gap-1 align-items-center";
+        document.getElementById(`cf-input-${field.id}`).before(prev);
+      }
+      prev.innerHTML = `<a href="${data.url}" target="_blank"><img src="${thumb}" style="max-height:56px;border-radius:4px;"></a>`;
+    }
+  } catch(e) {
+    statusEl.textContent = `✗ ${e.message}`;
+    statusEl.className = "small text-danger";
+  }
+}
+
+// Extend save to include staged file fields via a follow-up PATCH
+const _origSubmit = document.getElementById("contact-form").onsubmit;
+document.getElementById("contact-form").addEventListener("submit", async () => {
+  const stagedEntries = Object.entries(_contactStagedFiles);
+  if (!stagedEntries.length) return;
+  const rowId = document.getElementById("contact-row-id").value;
+  if (!rowId) return;   // new row — row_id set after save; patch handled on next save
+  const filePatch = {};
+  stagedEntries.forEach(([name, f]) => { filePatch[name] = [{ name: f.name }]; });
+  try {
+    await fetch(`/api/table-row/contacts/${rowId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(filePatch),
+    });
+  } catch(_) { /* non-fatal */ }
+});
+
+// Load file fields on page init (no pre-populated row data yet)
+loadContactFileFields();
+
+// Re-run when a contact is loaded from search
+const _origPrefill = prefillForm;
+window.prefillFormOrig = _origPrefill;
+prefillForm = function(c) {
+  _origPrefill(c);
+  loadContactFileFields(c._raw_row || {});
+};
 </script>
 {% endblock %}
