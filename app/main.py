@@ -442,6 +442,111 @@ def api_manual_save():
     return jsonify(ok=True, row_id=new_row_id, errors=errors)
 
 
+@app.route("/validate")
+def validate_page():
+    c = cfg.load_config()
+    positions, units = [], []
+    try:
+        client = _make_client()
+
+        # Fetch positions and units
+        pos_rows = client.get_all_rows(int(c["table_positions"]))
+        unit_rows = client.get_all_rows(int(c["table_units"]))
+
+        # Fetch all assignments once and tally counts
+        asn_rows = client.get_all_rows(int(c["table_assignments"]))
+        pos_counts: dict[str, int] = {}
+        unit_counts: dict[str, int] = {}
+        for a in asn_rows:
+            pos_link = a.get("Position", [])
+            if isinstance(pos_link, list) and pos_link:
+                pname = pos_link[0].get("value", "")
+                pos_counts[pname] = pos_counts.get(pname, 0) + 1
+            unit_link = a.get("Unit", [])
+            if isinstance(unit_link, list) and unit_link:
+                uname = unit_link[0].get("value", "")
+                unit_counts[uname] = unit_counts.get(uname, 0) + 1
+
+        positions = sorted([
+            {
+                "name": r.get("Position Name", ""),
+                "row_id": r.get("id"),
+                "assignment_count": pos_counts.get(r.get("Position Name", ""), 0),
+            }
+            for r in pos_rows if r.get("Position Name")
+        ], key=lambda x: x["name"].lower())
+
+        units = sorted([
+            {
+                "name": r.get("Unit Name", ""),
+                "row_id": r.get("id"),
+                "assignment_count": unit_counts.get(r.get("Unit Name", ""), 0),
+            }
+            for r in unit_rows if r.get("Unit Name")
+        ], key=lambda x: x["name"].lower())
+
+    except Exception as e:
+        flash(f"Could not load data: {e}", "danger")
+
+    return render_template("validate.html", positions=positions, units=units)
+
+
+@app.route("/api/validate/export")
+def api_validate_export():
+    import csv
+    import io
+    from flask import Response
+
+    export_type = request.args.get("type", "all")  # positions | units | all
+    c = cfg.load_config()
+    try:
+        client = _make_client()
+        pos_rows = client.get_all_rows(int(c["table_positions"]))
+        unit_rows = client.get_all_rows(int(c["table_units"]))
+        asn_rows = client.get_all_rows(int(c["table_assignments"]))
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    # Tally counts
+    pos_counts: dict[str, int] = {}
+    unit_counts: dict[str, int] = {}
+    for a in asn_rows:
+        pos_link = a.get("Position", [])
+        if isinstance(pos_link, list) and pos_link:
+            pname = pos_link[0].get("value", "")
+            pos_counts[pname] = pos_counts.get(pname, 0) + 1
+        unit_link = a.get("Unit", [])
+        if isinstance(unit_link, list) and unit_link:
+            uname = unit_link[0].get("value", "")
+            unit_counts[uname] = unit_counts.get(uname, 0) + 1
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    if export_type in ("positions", "all"):
+        writer.writerow(["Type", "Name", "Assignment Count", "Baserow ID"])
+        for r in sorted(pos_rows, key=lambda x: x.get("Position Name", "").lower()):
+            name = r.get("Position Name", "")
+            writer.writerow(["Position", name, pos_counts.get(name, 0), r.get("id", "")])
+
+    if export_type == "all":
+        writer.writerow([])  # blank separator row
+
+    if export_type in ("units", "all"):
+        if export_type == "units":
+            writer.writerow(["Type", "Name", "Assignment Count", "Baserow ID"])
+        for r in sorted(unit_rows, key=lambda x: x.get("Unit Name", "").lower()):
+            name = r.get("Unit Name", "")
+            writer.writerow(["Unit", name, unit_counts.get(name, 0), r.get("id", "")])
+
+    filename = f"hod_{export_type}_validation.csv"
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @app.route("/history")
 def history_page():
     c = cfg.load_config()

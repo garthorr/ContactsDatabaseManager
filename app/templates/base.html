@@ -34,6 +34,10 @@
           <a class="nav-link {% if request.path == '/history' %}active{% endif %}"
              href="{{ url_for('history_page') }}">History</a>
         </li>
+        <li class="nav-item">
+          <a class="nav-link {% if request.path == '/validate' %}active{% endif %}"
+             href="{{ url_for('validate_page') }}">Validate</a>
+        </li>
         {% else %}
         <li class="nav-item">
           <span class="nav-link text-muted">Import</span>
@@ -43,6 +47,9 @@
         </li>
         <li class="nav-item">
           <span class="nav-link text-muted">History</span>
+        </li>
+        <li class="nav-item">
+          <span class="nav-link text-muted">Validate</span>
         </li>
         {% endif %}
       </ul>
