@@ -175,20 +175,16 @@ function clearForm() {
 document.getElementById("btn-new").addEventListener("click", clearForm);
 
 // ── Assignment rows ────────────────────────────────────────────
-function unitOptions(selected = "") {
-  return `<option value="">— unit —</option>` +
-    UNITS.map(u => `<option value="${u}"${u === selected ? " selected" : ""}>${u}</option>`).join("");
-}
-function posOptions(selected = "") {
-  return `<option value="">— position —</option>` +
-    POSITIONS.map(p => `<option value="${p}"${p === selected ? " selected" : ""}>${p}</option>`).join("");
+function optionsList(items, placeholder, selected = "") {
+  return `<option value="">— ${placeholder} —</option>` +
+    items.map(v => `<option value="${v}"${v === selected ? " selected" : ""}>${v}</option>`).join("");
 }
 
 function addAssignmentRow(unit = "", position = "") {
   const tr = document.createElement("tr");
   tr.innerHTML = `
-    <td><select class="form-select form-select-sm asn-unit">${unitOptions(unit)}</select></td>
-    <td><select class="form-select form-select-sm asn-pos">${posOptions(position)}</select></td>
+    <td><select class="form-select form-select-sm asn-unit">${optionsList(UNITS, "unit", unit)}</select></td>
+    <td><select class="form-select form-select-sm asn-pos">${optionsList(POSITIONS, "position", position)}</select></td>
     <td><button type="button" class="btn btn-sm btn-outline-danger btn-rm-asn">✕</button></td>`;
   tr.querySelector(".btn-rm-asn").addEventListener("click", () => tr.remove());
   document.getElementById("asn-tbody").appendChild(tr);

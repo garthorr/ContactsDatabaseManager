@@ -81,17 +81,18 @@ class BaserowClient:
     # Meta endpoints
     # ------------------------------------------------------------------ #
 
-    def get_applications(self) -> list[dict]:
-        data = self._request("GET", "/api/applications/")
+    @staticmethod
+    def _list(data) -> list[dict]:
         return data if isinstance(data, list) else data.get("results", data)
+
+    def get_applications(self) -> list[dict]:
+        return self._list(self._request("GET", "/api/applications/"))
 
     def get_tables(self, database_id: int) -> list[dict]:
-        data = self._request("GET", f"/api/database/tables/database/{database_id}/")
-        return data if isinstance(data, list) else data.get("results", data)
+        return self._list(self._request("GET", f"/api/database/tables/database/{database_id}/"))
 
     def get_fields(self, table_id: int) -> list[dict]:
-        data = self._request("GET", f"/api/database/fields/table/{table_id}/")
-        return data if isinstance(data, list) else data.get("results", data)
+        return self._list(self._request("GET", f"/api/database/fields/table/{table_id}/"))
 
     # ------------------------------------------------------------------ #
     # Row endpoints

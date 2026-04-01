@@ -10,6 +10,7 @@ Structured in four sections:
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional
 
@@ -151,6 +152,13 @@ def detect_c10_mapping(headers: list[str]) -> dict[str, str]:
     return mapping
 
 
+def extract_link_row_value(field_val) -> str:
+    """Extract the text value from a Baserow link_row field: [{id, value}, ...]."""
+    if isinstance(field_val, list) and field_val:
+        return field_val[0].get("value", "")
+    return ""
+
+
 # ============================================================ #
 # Section 2 — Diff engine                                       #
 # ============================================================ #
@@ -224,17 +232,12 @@ def fetch_all_assignments(client, table_id: int) -> dict[str, list[Assignment]]:
     by_email: dict[str, list[Assignment]] = {}
     for row in rows:
         # link_row fields come back as [{id, value}, ...] — extract text value
-        contact_link = row.get("Contact", [])
-        if isinstance(contact_link, list) and contact_link:
-            contact_email = normalize_email(contact_link[0].get("value", ""))
-        else:
+        contact_email = normalize_email(extract_link_row_value(row.get("Contact", [])))
+        if not contact_email:
             continue
 
-        unit_link = row.get("Unit", [])
-        unit_name = unit_link[0].get("value", "") if (isinstance(unit_link, list) and unit_link) else ""
-
-        pos_link = row.get("Position", [])
-        pos_name = pos_link[0].get("value", "") if (isinstance(pos_link, list) and pos_link) else ""
+        unit_name = extract_link_row_value(row.get("Unit", []))
+        pos_name = extract_link_row_value(row.get("Position", []))
 
         asn = Assignment(
             contact_email=contact_email,
@@ -377,8 +380,11 @@ def run_diff(
     client = BaserowClient(
         config["baserow_url"], config["baserow_email"], config["baserow_password"]
     )
-    existing_contacts = fetch_all_contacts(client, int(config["table_contacts"]))
-    existing_assignments = fetch_all_assignments(client, int(config["table_assignments"]))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_contacts = pool.submit(fetch_all_contacts, client, int(config["table_contacts"]))
+        f_assignments = pool.submit(fetch_all_assignments, client, int(config["table_assignments"]))
+        existing_contacts = f_contacts.result()
+        existing_assignments = f_assignments.result()
 
     results = []
     for raw_row in rows:

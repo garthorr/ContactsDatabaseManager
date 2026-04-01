@@ -52,6 +52,11 @@ function debounce(fn, delay = 300) {
   };
 }
 
+// ── HTML escape ──────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
 // ── Generic JSON fetch ────────────────────────────────────────────────────
 async function postJSON(url, data) {
   const resp = await fetch(url, {
