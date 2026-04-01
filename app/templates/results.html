@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Import Results{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-8">
+    <h3 class="mb-1">Import Complete</h3>
+    <p class="text-muted mb-4">{{ filename }}</p>
+
+    <!-- Stat cards -->
+    <div class="row row-cols-2 row-cols-sm-3 g-3 mb-4">
+      <div class="col">
+        <div class="card text-white bg-success h-100 text-center">
+          <div class="card-body">
+            <div class="fs-2 fw-bold">{{ results.created }}</div>
+            <div>Contacts Created</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-white bg-primary h-100 text-center">
+          <div class="card-body">
+            <div class="fs-2 fw-bold">{{ results.updated }}</div>
+            <div>Contacts Updated</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-white bg-warning h-100 text-center">
+          <div class="card-body">
+            <div class="fs-2 fw-bold">{{ results.new_positions }}</div>
+            <div>Assignments Created</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-dark bg-light h-100 text-center">
+          <div class="card-body">
+            <div class="fs-2 fw-bold">{{ results.skipped }}</div>
+            <div>Skipped</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card {% if results.errors %}text-white bg-danger{% else %}text-dark bg-light{% endif %} h-100 text-center">
+          <div class="card-body">
+            <div class="fs-2 fw-bold">{{ results.errors | length }}</div>
+            <div>Errors</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {% if results.errors %}
+    <div class="card border-danger mb-4">
+      <div class="card-header text-white bg-danger">Errors</div>
+      <div class="card-body p-0">
+        <ul class="list-group list-group-flush">
+          {% for err in results.errors %}
+          <li class="list-group-item small text-danger">{{ err }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    {% endif %}
+
+    <div class="d-flex gap-3">
+      <a href="{{ url_for('import_page') }}" class="btn btn-primary">Import Another File</a>
+      <a href="{{ url_for('history_page') }}" class="btn btn-outline-secondary">View History</a>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,47 @@
+/* HoD Contact Manager — custom styles */
+
+:root {
+  --scout-purple: #4b0082;
+}
+
+.navbar-brand {
+  letter-spacing: 0.02em;
+}
+
+/* Drag-and-drop upload zone */
+.drop-zone {
+  border: 2px dashed #adb5bd;
+  border-radius: 0.5rem;
+  padding: 3rem;
+  text-align: center;
+  background: #f8f9fa;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.drop-zone.drag-over {
+  border-color: #0d6efd;
+  background: #e8f0fe;
+}
+
+/* Diff highlight colours */
+.field-changed { background-color: #fff3cd; }
+.field-new     { background-color: #d1e7dd; }
+.field-removed { background-color: #f8d7da; }
+
+/* Status badges */
+.badge-NEW                   { background-color: #198754 !important; }
+.badge-CLEAN_UPDATE          { background-color: #0d6efd !important; }
+.badge-NEW_ADDITIONAL_POSITION { background-color: #fd7e14 !important; }
+.badge-STALE                 { background-color: #6c757d !important; }
+.badge-NO_CHANGE             { background-color: #adb5bd !important; }
+
+/* Loading overlay */
+#loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(255,255,255,0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}

@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% block title %}Import{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-10">
+    <h3 class="mb-4">Import Contacts</h3>
+
+    <!-- ── Section 1: File upload ── -->
+    <div id="section-upload">
+      <div class="card">
+        <div class="card-body">
+          <div class="drop-zone" id="drop-zone">
+            <div class="mb-3">
+              <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="#adb5bd" viewBox="0 0 16 16">
+                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L5.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+              </svg>
+            </div>
+            <p class="mb-1 fw-semibold">Drag &amp; drop an Excel or CSV file</p>
+            <p class="text-muted small mb-3">or click to browse</p>
+            <input type="file" id="file-input" accept=".xlsx,.xls,.csv" class="d-none">
+            <button class="btn btn-outline-primary btn-sm" id="btn-browse">Choose File</button>
+          </div>
+          <div id="upload-error" class="alert alert-danger mt-3 d-none"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Section 2: Column mapping ── -->
+    <div id="section-mapping" class="d-none">
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span id="file-summary" class="fw-semibold"></span>
+          <button class="btn btn-link btn-sm text-muted" id="btn-reupload">Upload different file</button>
+        </div>
+        <div class="card-body">
+          <h6 class="mb-3">Map source columns to target fields</h6>
+          <div class="row row-cols-1 row-cols-md-2 g-3" id="mapping-rows">
+            <!-- populated by JS -->
+          </div>
+
+          <hr class="my-4">
+
+          <h6>Match Key</h6>
+          <p class="text-muted small">How should the app identify existing contacts?</p>
+          <div class="d-flex gap-3 flex-wrap mb-3">
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="match-key" id="mk-email" value="Email" checked>
+              <label class="form-check-label" for="mk-email">Email</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="match-key" id="mk-name" value="First+Last">
+              <label class="form-check-label" for="mk-name">First + Last Name</label>
+            </div>
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="match-key" id="mk-custom" value="Custom">
+              <label class="form-check-label" for="mk-custom">Custom column</label>
+            </div>
+          </div>
+          <div id="custom-col-wrap" class="d-none mb-3">
+            <input type="text" class="form-control form-control-sm" id="custom-col-input"
+                   placeholder="Enter target field name to use as key">
+          </div>
+
+          <div id="analyze-error" class="alert alert-danger d-none"></div>
+
+          <div class="d-flex gap-2">
+            <button class="btn btn-primary" id="btn-analyze">
+              <span id="btn-analyze-text">Analyze</span>
+              <span id="btn-analyze-spin" class="spinner-border spinner-border-sm d-none ms-2"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+"use strict";
+let uploadId = null;
+let sourceHeaders = [];
+
+const TARGET_FIELDS = [
+  "Email","First Name","Last Name","Mobile","Street","City","Zip",
+  "Unit","Position","Source","Direct Contact Leader","Trained",
+  "Registration Expiration","Last Update","Unsubscribed"
+];
+
+// ── Drag-and-drop ──────────────────────────────────────────────
+const dropZone = document.getElementById("drop-zone");
+const fileInput = document.getElementById("file-input");
+
+document.getElementById("btn-browse").addEventListener("click", () => fileInput.click());
+dropZone.addEventListener("click", e => { if (e.target.id !== "btn-browse") fileInput.click(); });
+dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("drag-over"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"));
+dropZone.addEventListener("drop", e => {
+  e.preventDefault(); dropZone.classList.remove("drag-over");
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", () => { if (fileInput.files[0]) uploadFile(fileInput.files[0]); });
+
+document.getElementById("btn-reupload").addEventListener("click", () => {
+  document.getElementById("section-upload").classList.remove("d-none");
+  document.getElementById("section-mapping").classList.add("d-none");
+  fileInput.value = "";
+});
+
+// ── Upload ────────────────────────────────────────────────────
+async function uploadFile(file) {
+  const errEl = document.getElementById("upload-error");
+  errEl.classList.add("d-none");
+  showLoading("Uploading and reading file…");
+  const fd = new FormData();
+  fd.append("file", file);
+  let resp, data;
+  try {
+    resp = await fetch("/api/import/upload", { method: "POST", body: fd });
+    data = await resp.json();
+  } catch(e) {
+    hideLoading();
+    errEl.textContent = "Network error: " + e.message;
+    errEl.classList.remove("d-none");
+    return;
+  }
+  hideLoading();
+  if (!resp.ok) {
+    errEl.textContent = data.error || "Upload failed.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  uploadId = data.upload_id;
+  sourceHeaders = data.headers;
+  buildMappingUI(data.headers, data.row_count, data.suggested_mapping, file.name);
+}
+
+// ── Mapping UI ────────────────────────────────────────────────
+function buildMappingUI(headers, rowCount, suggested, filename) {
+  document.getElementById("file-summary").textContent =
+    `${filename} — ${rowCount.toLocaleString()} rows`;
+  const container = document.getElementById("mapping-rows");
+  container.innerHTML = "";
+  TARGET_FIELDS.forEach(target => {
+    const col = document.createElement("div");
+    col.className = "col";
+    let opts = '<option value="">(not mapped)</option>';
+    headers.forEach(h => {
+      const sel = (suggested[h] === target) ? ' selected' : '';
+      opts += `<option value="${h}"${sel}>${h}</option>`;
+    });
+    col.innerHTML = `
+      <label class="form-label small fw-semibold mb-1">${target}</label>
+      <select class="form-select form-select-sm" data-target="${target}">${opts}</select>`;
+    container.appendChild(col);
+  });
+  document.getElementById("section-upload").classList.add("d-none");
+  document.getElementById("section-mapping").classList.remove("d-none");
+}
+
+// ── Match key radio ────────────────────────────────────────────
+document.querySelectorAll('input[name="match-key"]').forEach(radio => {
+  radio.addEventListener("change", () => {
+    document.getElementById("custom-col-wrap").classList.toggle(
+      "d-none", radio.value !== "Custom"
+    );
+  });
+});
+
+// ── Analyze ───────────────────────────────────────────────────
+document.getElementById("btn-analyze").addEventListener("click", async () => {
+  const errEl = document.getElementById("analyze-error");
+  errEl.classList.add("d-none");
+  if (!uploadId) return;
+
+  // Build mapping from selects
+  const mapping = {};
+  document.querySelectorAll("#mapping-rows select").forEach(sel => {
+    if (sel.value) mapping[sel.value] = sel.dataset.target;
+  });
+
+  const matchKey = document.querySelector('input[name="match-key"]:checked').value;
+  const customCol = document.getElementById("custom-col-input").value.trim();
+
+  if (matchKey === "Custom" && !customCol) {
+    errEl.textContent = "Please specify the custom match column.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+
+  showLoading("Fetching existing data and analysing changes…");
+  document.getElementById("btn-analyze").disabled = true;
+  document.getElementById("btn-analyze-spin").classList.remove("d-none");
+
+  let resp, data;
+  try {
+    resp = await fetch("/api/import/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upload_id: uploadId, mapping, match_key: matchKey, custom_match_col: customCol }),
+    });
+    data = await resp.json();
+  } catch(e) {
+    hideLoading();
+    document.getElementById("btn-analyze").disabled = false;
+    document.getElementById("btn-analyze-spin").classList.add("d-none");
+    errEl.textContent = "Network error: " + e.message;
+    errEl.classList.remove("d-none");
+    return;
+  }
+  hideLoading();
+  document.getElementById("btn-analyze").disabled = false;
+  document.getElementById("btn-analyze-spin").classList.add("d-none");
+  if (!resp.ok) {
+    errEl.textContent = data.error || "Analysis failed.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  window.location.href = data.redirect;
+});
+</script>
+{% endblock %}

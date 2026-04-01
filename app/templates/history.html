@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Import History{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-10">
+    <h3 class="mb-4">Import History</h3>
+
+    {% if rows %}
+    <div class="table-responsive">
+      <table class="table table-hover align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Date</th>
+            <th>Filename</th>
+            <th>Format</th>
+            <th class="text-success">Created</th>
+            <th class="text-primary">Updated</th>
+            <th class="text-warning">Positions</th>
+            <th>Skipped</th>
+            <th class="text-danger">Errors</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr class="history-row" data-bs-toggle="modal" data-bs-target="#detailModal"
+              data-row="{{ row | tojson | e }}" style="cursor:pointer">
+            <td class="text-nowrap small">{{ row.get("Import Date", "—") }}</td>
+            <td class="text-break small">{{ row.get("Filename", "—") }}</td>
+            <td class="small">{{ row.get("Source Format", "—") }}</td>
+            <td class="text-success fw-semibold">{{ row.get("New Contacts", 0) }}</td>
+            <td class="text-primary fw-semibold">{{ row.get("Updated Contacts", 0) }}</td>
+            <td class="text-warning fw-semibold">{{ row.get("New Assignments", 0) }}</td>
+            <td class="text-muted">{{ row.get("Skipped", 0) }}</td>
+            <td class="{% if row.get('Errors', 0) %}text-danger fw-semibold{% else %}text-muted{% endif %}">
+              {{ row.get("Errors", 0) }}
+            </td>
+            <td>
+              {% set s = row.get("Status", "") %}
+              <span class="badge {% if s == "Success" %}bg-success{% elif s == "Partial" %}bg-warning text-dark{% else %}bg-danger{% endif %}">
+                {{ s or "—" }}
+              </span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center py-5 text-muted">
+      <p>No import history yet.</p>
+      <a href="{{ url_for('import_page') }}" class="btn btn-primary">Import File</a>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Detail modal -->
+<div class="modal fade" id="detailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="modal-title">Import Detail</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll(".history-row").forEach(row => {
+  row.addEventListener("click", () => {
+    const data = JSON.parse(row.dataset.row);
+    document.getElementById("modal-title").textContent = data.Filename || "Import Detail";
+    let html = '<dl class="row">';
+    for (const [k, v] of Object.entries(data)) {
+      if (k === "id") continue;
+      const val = (v === null || v === undefined || v === "") ? "—" : String(v);
+      html += `<dt class="col-sm-5 text-muted">${k}</dt><dd class="col-sm-7">${val}</dd>`;
+    }
+    html += "</dl>";
+    document.getElementById("modal-body").innerHTML = html;
+  });
+});
+</script>
+{% endblock %}

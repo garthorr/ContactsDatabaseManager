@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+{% block title %}Data Validation{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-12">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <h3 class="mb-0">Data Validation Report</h3>
+      <div class="d-flex gap-2">
+        <a href="/api/validate/export?type=positions" class="btn btn-outline-secondary btn-sm">
+          Export Positions CSV
+        </a>
+        <a href="/api/validate/export?type=units" class="btn btn-outline-secondary btn-sm">
+          Export Units CSV
+        </a>
+        <a href="/api/validate/export?type=all" class="btn btn-outline-primary btn-sm">
+          Export All CSV
+        </a>
+      </div>
+    </div>
+
+    <!-- Summary cards -->
+    <div class="row row-cols-2 row-cols-md-4 g-3 mb-4">
+      <div class="col">
+        <div class="card text-center border-0 bg-primary text-white">
+          <div class="card-body py-2">
+            <div class="fs-3 fw-bold">{{ positions | length }}</div>
+            <div class="small">Positions</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-center border-0 bg-success text-white">
+          <div class="card-body py-2">
+            <div class="fs-3 fw-bold">{{ units | length }}</div>
+            <div class="small">Units</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-center border-0 bg-warning text-dark">
+          <div class="card-body py-2">
+            <div class="fs-3 fw-bold">{{ positions | selectattr("assignment_count", "equalto", 0) | list | length }}</div>
+            <div class="small">Unused Positions</div>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card text-center border-0 bg-warning text-dark">
+          <div class="card-body py-2">
+            <div class="fs-3 fw-bold">{{ units | selectattr("assignment_count", "equalto", 0) | list | length }}</div>
+            <div class="small">Unused Units</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab navigation -->
+    <ul class="nav nav-tabs mb-3" id="validateTabs">
+      <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-positions">
+          Positions <span class="badge bg-primary ms-1">{{ positions | length }}</span>
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-units">
+          Units <span class="badge bg-success ms-1">{{ units | length }}</span>
+        </button>
+      </li>
+    </ul>
+
+    <div class="tab-content">
+
+      <!-- Positions tab -->
+      <div class="tab-pane fade show active" id="tab-positions">
+        <div class="mb-3 d-flex gap-2 align-items-center">
+          <input type="text" class="form-control form-control-sm w-auto flex-grow-1"
+                 id="pos-search" placeholder="Filter positions…">
+          <label class="form-check-label ms-2 small text-muted">
+            <input type="checkbox" class="form-check-input me-1" id="pos-unused-only">
+            Unused only
+          </label>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover" id="pos-table">
+            <thead class="table-light">
+              <tr>
+                <th class="sortable" data-col="0">Position Name <span class="sort-icon text-muted">↕</span></th>
+                <th class="sortable text-end" data-col="1">Assignments <span class="sort-icon text-muted">↕</span></th>
+                <th>Baserow ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in positions %}
+              <tr class="pos-row {% if p.assignment_count == 0 %}table-warning{% endif %}"
+                  data-name="{{ p.name | lower }}"
+                  data-count="{{ p.assignment_count }}">
+                <td>
+                  {{ p.name }}
+                  {% if p.assignment_count == 0 %}
+                  <span class="badge bg-warning text-dark ms-1">unused</span>
+                  {% endif %}
+                </td>
+                <td class="text-end">{{ p.assignment_count }}</td>
+                <td class="text-muted small">{{ p.row_id }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted small mt-1" id="pos-count-label"></p>
+      </div>
+
+      <!-- Units tab -->
+      <div class="tab-pane fade" id="tab-units">
+        <div class="mb-3 d-flex gap-2 align-items-center">
+          <input type="text" class="form-control form-control-sm w-auto flex-grow-1"
+                 id="unit-search" placeholder="Filter units…">
+          <label class="form-check-label ms-2 small text-muted">
+            <input type="checkbox" class="form-check-input me-1" id="unit-unused-only">
+            Unused only
+          </label>
+        </div>
+        <div class="table-responsive">
+          <table class="table table-sm table-hover" id="unit-table">
+            <thead class="table-light">
+              <tr>
+                <th class="sortable" data-col="0">Unit Name <span class="sort-icon text-muted">↕</span></th>
+                <th class="sortable text-end" data-col="1">Assignments <span class="sort-icon text-muted">↕</span></th>
+                <th>Baserow ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for u in units %}
+              <tr class="unit-row {% if u.assignment_count == 0 %}table-warning{% endif %}"
+                  data-name="{{ u.name | lower }}"
+                  data-count="{{ u.assignment_count }}">
+                <td>
+                  {{ u.name }}
+                  {% if u.assignment_count == 0 %}
+                  <span class="badge bg-warning text-dark ms-1">unused</span>
+                  {% endif %}
+                </td>
+                <td class="text-end">{{ u.assignment_count }}</td>
+                <td class="text-muted small">{{ u.row_id }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted small mt-1" id="unit-count-label"></p>
+      </div>
+
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+"use strict";
+
+// ── Generic filter + sort for a table ────────────────────────────────────
+function initTable(tableId, searchId, unusedCheckId, rowClass, countLabelId) {
+  const table   = document.getElementById(tableId);
+  const search  = document.getElementById(searchId);
+  const chk     = document.getElementById(unusedCheckId);
+  const label   = document.getElementById(countLabelId);
+  const headers = table.querySelectorAll("th.sortable");
+  let sortCol = -1, sortAsc = true;
+
+  function applyFilter() {
+    const q = search.value.trim().toLowerCase();
+    const unusedOnly = chk.checked;
+    let visible = 0;
+    table.querySelectorAll("." + rowClass).forEach(row => {
+      const name  = row.dataset.name || "";
+      const count = parseInt(row.dataset.count || "0");
+      const show  = (!q || name.includes(q)) && (!unusedOnly || count === 0);
+      row.style.display = show ? "" : "none";
+      if (show) visible++;
+    });
+    const total = table.querySelectorAll("." + rowClass).length;
+    label.textContent = visible === total
+      ? `${total} rows`
+      : `${visible} of ${total} rows shown`;
+  }
+
+  function applySort(colIdx) {
+    if (sortCol === colIdx) { sortAsc = !sortAsc; }
+    else { sortCol = colIdx; sortAsc = true; }
+    headers.forEach((h, i) => {
+      h.querySelector(".sort-icon").textContent = i === sortCol ? (sortAsc ? "↑" : "↓") : "↕";
+    });
+    const tbody = table.querySelector("tbody");
+    const rows  = Array.from(tbody.querySelectorAll("." + rowClass));
+    rows.sort((a, b) => {
+      const aVal = colIdx === 1
+        ? parseInt(a.dataset.count)
+        : a.dataset.name;
+      const bVal = colIdx === 1
+        ? parseInt(b.dataset.count)
+        : b.dataset.name;
+      if (aVal < bVal) return sortAsc ? -1 : 1;
+      if (aVal > bVal) return sortAsc ?  1 : -1;
+      return 0;
+    });
+    rows.forEach(r => tbody.appendChild(r));
+  }
+
+  search.addEventListener("input", applyFilter);
+  chk.addEventListener("change", applyFilter);
+  headers.forEach(h => h.addEventListener("click", () => applySort(parseInt(h.dataset.col))));
+  applyFilter();
+}
+
+initTable("pos-table",  "pos-search",  "pos-unused-only",  "pos-row",  "pos-count-label");
+initTable("unit-table", "unit-search", "unit-unused-only", "unit-row", "unit-count-label");
+
+// Make sort headers look clickable
+document.querySelectorAll("th.sortable").forEach(h => h.style.cursor = "pointer");
+</script>
+{% endblock %}

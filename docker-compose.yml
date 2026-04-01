@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-5500}:5000"
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    environment:
+      - FLASK_ENV=${FLASK_ENV:-production}
+      - BASEROW_URL=${BASEROW_URL:-}
+      - BASEROW_EMAIL=${BASEROW_EMAIL:-}
+      - BASEROW_PASSWORD=${BASEROW_PASSWORD:-}
+    restart: unless-stopped
