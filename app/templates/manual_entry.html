@@ -1,5 +1,243 @@
 {% extends "base.html" %}
 {% block title %}Manual Entry{% endblock %}
+
 {% block content %}
-<h3>Manual Entry — coming in Phase 6</h3>
+<div class="row">
+  <div class="col-lg-8">
+    <h3 class="mb-4">Manual Entry</h3>
+
+    <!-- Search bar -->
+    <div class="card mb-4">
+      <div class="card-body">
+        <label class="form-label fw-semibold">Search Existing Contact</label>
+        <div class="input-group">
+          <input type="text" class="form-control" id="search-input"
+                 placeholder="Email or first/last name…">
+          <button class="btn btn-outline-secondary" type="button" id="btn-clear-search">Clear</button>
+        </div>
+        <div id="search-results" class="list-group mt-2 d-none"></div>
+      </div>
+    </div>
+
+    <!-- Contact form -->
+    <form id="contact-form">
+      <input type="hidden" id="contact-row-id" value="">
+
+      <div class="card mb-3">
+        <div class="card-header fw-semibold">Contact Details</div>
+        <div class="card-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">Email *</label>
+              <input type="email" class="form-control" id="f-email" required>
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">First Name</label>
+              <input type="text" class="form-control" id="f-first">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Last Name</label>
+              <input type="text" class="form-control" id="f-last">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Mobile</label>
+              <input type="tel" class="form-control" id="f-mobile">
+            </div>
+            <div class="col-md-8">
+              <label class="form-label">Street</label>
+              <input type="text" class="form-control" id="f-street">
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">City</label>
+              <input type="text" class="form-control" id="f-city">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Zip</label>
+              <input type="text" class="form-control" id="f-zip">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Source</label>
+              <input type="text" class="form-control" id="f-source">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Last Update</label>
+              <input type="date" class="form-control" id="f-last-update">
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <div class="form-check mb-2">
+                <input type="checkbox" class="form-check-input" id="f-unsub">
+                <label class="form-check-label" for="f-unsub">Unsubscribed</label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Assignments -->
+      <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <span class="fw-semibold">Assignments</span>
+          <button type="button" class="btn btn-sm btn-outline-primary" id="btn-add-asn">+ Add Row</button>
+        </div>
+        <div class="card-body p-0">
+          <table class="table table-sm mb-0" id="asn-table">
+            <thead class="table-light">
+              <tr><th>Unit</th><th>Position</th><th></th></tr>
+            </thead>
+            <tbody id="asn-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="save-error" class="alert alert-danger d-none"></div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-success" id="btn-save">
+          <span id="save-text">Save Contact</span>
+          <span id="save-spin" class="spinner-border spinner-border-sm d-none ms-2"></span>
+        </button>
+        <button type="button" class="btn btn-outline-secondary" id="btn-new">New (Clear Form)</button>
+      </div>
+    </form>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+"use strict";
+
+const UNITS = {{ units_list | tojson }};
+const POSITIONS = {{ positions_list | tojson }};
+
+// ── Search ────────────────────────────────────────────────────
+const searchInput = document.getElementById("search-input");
+const searchResults = document.getElementById("search-results");
+
+searchInput.addEventListener("input", debounce(async () => {
+  const q = searchInput.value.trim();
+  if (q.length < 2) { searchResults.classList.add("d-none"); return; }
+  const resp = await fetch(`/api/manual/search?q=${encodeURIComponent(q)}`);
+  const data = await resp.json();
+  if (!data.contacts || data.contacts.length === 0) {
+    searchResults.innerHTML = '<div class="list-group-item text-muted">No matches found.</div>';
+    searchResults.classList.remove("d-none");
+    return;
+  }
+  searchResults.innerHTML = data.contacts.map(c =>
+    `<button type="button" class="list-group-item list-group-item-action" data-contact='${JSON.stringify(c)}'>
+      <strong>${c.first_name} ${c.last_name}</strong> <span class="text-muted">${c.email}</span>
+    </button>`
+  ).join("");
+  searchResults.classList.remove("d-none");
+  searchResults.querySelectorAll("button").forEach(btn => {
+    btn.addEventListener("click", () => prefillForm(JSON.parse(btn.dataset.contact)));
+  });
+}, 300));
+
+document.getElementById("btn-clear-search").addEventListener("click", () => {
+  searchInput.value = "";
+  searchResults.classList.add("d-none");
+  clearForm();
+});
+
+function prefillForm(c) {
+  document.getElementById("contact-row-id").value = c.row_id || "";
+  document.getElementById("f-email").value = c.email || "";
+  document.getElementById("f-first").value = c.first_name || "";
+  document.getElementById("f-last").value = c.last_name || "";
+  document.getElementById("f-mobile").value = c.mobile || "";
+  document.getElementById("f-street").value = c.street || "";
+  document.getElementById("f-city").value = c.city || "";
+  document.getElementById("f-zip").value = c.zip_code || "";
+  document.getElementById("f-source").value = c.source || "";
+  document.getElementById("f-last-update").value = c.last_update ? c.last_update.substring(0, 10) : "";
+  document.getElementById("f-unsub").checked = !!c.unsubscribed;
+  // Assignments
+  const tbody = document.getElementById("asn-tbody");
+  tbody.innerHTML = "";
+  (c.assignments || []).forEach(a => addAssignmentRow(a.unit_name, a.position_name));
+  searchResults.classList.add("d-none");
+}
+
+function clearForm() {
+  document.getElementById("contact-row-id").value = "";
+  ["f-email","f-first","f-last","f-mobile","f-street","f-city","f-zip","f-source","f-last-update"].forEach(
+    id => document.getElementById(id).value = ""
+  );
+  document.getElementById("f-unsub").checked = false;
+  document.getElementById("asn-tbody").innerHTML = "";
+}
+
+document.getElementById("btn-new").addEventListener("click", clearForm);
+
+// ── Assignment rows ────────────────────────────────────────────
+function unitOptions(selected = "") {
+  return `<option value="">— unit —</option>` +
+    UNITS.map(u => `<option value="${u}"${u === selected ? " selected" : ""}>${u}</option>`).join("");
+}
+function posOptions(selected = "") {
+  return `<option value="">— position —</option>` +
+    POSITIONS.map(p => `<option value="${p}"${p === selected ? " selected" : ""}>${p}</option>`).join("");
+}
+
+function addAssignmentRow(unit = "", position = "") {
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><select class="form-select form-select-sm asn-unit">${unitOptions(unit)}</select></td>
+    <td><select class="form-select form-select-sm asn-pos">${posOptions(position)}</select></td>
+    <td><button type="button" class="btn btn-sm btn-outline-danger btn-rm-asn">✕</button></td>`;
+  tr.querySelector(".btn-rm-asn").addEventListener("click", () => tr.remove());
+  document.getElementById("asn-tbody").appendChild(tr);
+}
+
+document.getElementById("btn-add-asn").addEventListener("click", () => addAssignmentRow());
+
+// ── Save ──────────────────────────────────────────────────────
+document.getElementById("contact-form").addEventListener("submit", async e => {
+  e.preventDefault();
+  const errEl = document.getElementById("save-error");
+  errEl.classList.add("d-none");
+
+  const assignments = [];
+  document.querySelectorAll("#asn-tbody tr").forEach(tr => {
+    const unit = tr.querySelector(".asn-unit").value;
+    const pos  = tr.querySelector(".asn-pos").value;
+    if (unit || pos) assignments.push({ unit, position: pos });
+  });
+
+  const payload = {
+    row_id:       document.getElementById("contact-row-id").value || null,
+    email:        document.getElementById("f-email").value.trim(),
+    first_name:   document.getElementById("f-first").value.trim(),
+    last_name:    document.getElementById("f-last").value.trim(),
+    mobile:       document.getElementById("f-mobile").value.trim(),
+    street:       document.getElementById("f-street").value.trim(),
+    city:         document.getElementById("f-city").value.trim(),
+    zip_code:     document.getElementById("f-zip").value.trim(),
+    source:       document.getElementById("f-source").value.trim(),
+    last_update:  document.getElementById("f-last-update").value,
+    unsubscribed: document.getElementById("f-unsub").checked,
+    assignments,
+  };
+
+  document.getElementById("btn-save").disabled = true;
+  document.getElementById("save-spin").classList.remove("d-none");
+  document.getElementById("save-text").textContent = "Saving…";
+
+  const { ok, data } = await postJSON("/api/manual/save", payload);
+  document.getElementById("btn-save").disabled = false;
+  document.getElementById("save-spin").classList.add("d-none");
+  document.getElementById("save-text").textContent = "Save Contact";
+
+  if (!ok) {
+    errEl.textContent = data.error || "Save failed.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  document.getElementById("contact-row-id").value = data.row_id || "";
+  showToast("Contact saved successfully.", "success");
+});
+</script>
 {% endblock %}

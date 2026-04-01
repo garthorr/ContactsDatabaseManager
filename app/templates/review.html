@@ -1,0 +1,251 @@
+{% extends "base.html" %}
+{% block title %}Review Import{% endblock %}
+
+{% block content %}
+<div class="row">
+  <div class="col-lg-11">
+
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h3 class="mb-0">Review Import — {{ filename }}</h3>
+      <a href="{{ url_for('import_page') }}" class="btn btn-outline-secondary btn-sm">Start Over</a>
+    </div>
+
+    <!-- Summary counts -->
+    <div class="row row-cols-2 row-cols-sm-3 row-cols-md-5 g-3 mb-4">
+      {% set badges = [
+        ("NEW",                    summary.NEW,                    "success",   "New Contacts"),
+        ("CLEAN_UPDATE",           summary.CLEAN_UPDATE,           "primary",   "Clean Updates"),
+        ("NEW_ADDITIONAL_POSITION",summary.NEW_ADDITIONAL_POSITION,"warning",   "New Positions"),
+        ("STALE",                  summary.STALE,                  "secondary", "Stale"),
+        ("NO_CHANGE",              summary.NO_CHANGE,              "light",     "No Change"),
+      ] %}
+      {% for status, count, color, label in badges %}
+      <div class="col">
+        <div class="card text-center border-0 bg-{{ color }} {% if color == 'light' %}text-dark{% else %}text-white{% endif %}">
+          <div class="card-body py-2">
+            <div class="fs-3 fw-bold">{{ count }}</div>
+            <div class="small">{{ label }}</div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <!-- Tabs -->
+    <ul class="nav nav-tabs mb-3" id="reviewTabs">
+      <li class="nav-item">
+        <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-auto">
+          Auto-Apply
+          <span class="badge bg-success ms-1" id="auto-count">{{ summary.NEW + summary.CLEAN_UPDATE + summary.NEW_ADDITIONAL_POSITION }}</span>
+        </button>
+      </li>
+      <li class="nav-item">
+        <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stale">
+          Stale / Conflicts
+          <span class="badge bg-secondary ms-1">{{ summary.STALE }}</span>
+        </button>
+      </li>
+    </ul>
+
+    <div class="tab-content">
+      <!-- Auto-Apply tab -->
+      <div class="tab-pane fade show active" id="tab-auto">
+        {% set auto_rows = diff_results | selectattr("status", "in", ["NEW","CLEAN_UPDATE","NEW_ADDITIONAL_POSITION"]) | list %}
+        {% if auto_rows %}
+        <div class="table-responsive">
+          <table class="table table-sm table-hover align-middle">
+            <thead class="table-light">
+              <tr>
+                <th><input type="checkbox" id="chk-all" checked title="Select all"></th>
+                <th>Status</th>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Unit / Position</th>
+                <th>Changes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for i, r in auto_rows_indexed %}
+              <tr>
+                <td><input type="checkbox" class="row-chk" data-index="{{ i }}" checked></td>
+                <td>
+                  <span class="badge badge-{{ r.status }}">
+                    {% if r.status == "NEW" %}New{% elif r.status == "CLEAN_UPDATE" %}Update{% else %}New Position{% endif %}
+                  </span>
+                </td>
+                <td class="text-break small">{{ r.mapped.Email or "—" }}</td>
+                <td class="small">{{ r.mapped["First Name"] }} {{ r.mapped["Last Name"] }}</td>
+                <td class="small">
+                  {% if r.mapped.Unit or r.mapped.Position %}
+                  {{ r.mapped.Unit }}<br><span class="text-muted">{{ r.mapped.Position }}</span>
+                  {% else %}—{% endif %}
+                </td>
+                <td class="small">
+                  {% if r.field_changes %}
+                    {% for field, change in r.field_changes.items() %}
+                    <span class="badge bg-warning text-dark me-1">{{ field }}</span>
+                    {% endfor %}
+                  {% elif r.status == "NEW" %}
+                    <span class="text-success">New record</span>
+                  {% else %}
+                    <span class="text-muted">—</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="text-muted">No auto-apply rows.</p>
+        {% endif %}
+      </div>
+
+      <!-- Stale / Conflicts tab -->
+      <div class="tab-pane fade" id="tab-stale">
+        {% set stale_rows = diff_results | selectattr("status", "equalto", "STALE") | list %}
+        {% if stale_rows %}
+        <p class="text-muted small mb-3">These rows have an older "Last Update" than the existing record. Choose whether to skip or force-apply each.</p>
+        {% for i, r in stale_rows_indexed %}
+        <div class="card mb-3">
+          <div class="card-header d-flex justify-content-between">
+            <span class="fw-semibold">{{ r.mapped.Email }}</span>
+            <div class="d-flex gap-3">
+              <div class="form-check">
+                <input class="form-check-input conflict-decision" type="radio"
+                       name="conflict-{{ i }}" data-index="{{ i }}"
+                       id="skip-{{ i }}" value="skip" checked>
+                <label class="form-check-label text-muted" for="skip-{{ i }}">Skip</label>
+              </div>
+              <div class="form-check">
+                <input class="form-check-input conflict-decision" type="radio"
+                       name="conflict-{{ i }}" data-index="{{ i }}"
+                       id="force-{{ i }}" value="force">
+                <label class="form-check-label text-danger fw-semibold" for="force-{{ i }}">Force Apply</label>
+              </div>
+            </div>
+          </div>
+          <div class="card-body p-0">
+            <div class="row g-0">
+              <div class="col-md-6 border-end p-3">
+                <h6 class="text-muted small mb-2">EXISTING (Baserow)</h6>
+                {% if r.existing_contact %}
+                <dl class="row small mb-0">
+                  {% for field in ["first_name","last_name","mobile","street","city","zip_code","last_update","source"] %}
+                  <dt class="col-5 text-muted">{{ field.replace("_"," ").title() }}</dt>
+                  <dd class="col-7">{{ r.existing_contact[field] or "—" }}</dd>
+                  {% endfor %}
+                </dl>
+                {% endif %}
+              </div>
+              <div class="col-md-6 p-3">
+                <h6 class="text-muted small mb-2">INCOMING (file)</h6>
+                <dl class="row small mb-0">
+                  {% for label in ["First Name","Last Name","Mobile","Street","City","Zip","Last Update","Source"] %}
+                  <dt class="col-5 text-muted">{{ label }}</dt>
+                  <dd class="col-7">{{ r.mapped.get(label, "—") }}</dd>
+                  {% endfor %}
+                </dl>
+              </div>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <p class="text-muted">No stale or conflicting rows.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Apply bar -->
+    <div class="d-flex align-items-center gap-3 mt-4 p-3 bg-light rounded border">
+      <div>
+        <span class="fw-semibold" id="apply-label">Ready to apply</span>
+        <span class="text-muted small ms-2" id="apply-sublabel"></span>
+      </div>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-success" id="btn-apply">
+          <span id="btn-apply-text">Apply Changes</span>
+          <span id="btn-apply-spin" class="spinner-border spinner-border-sm d-none ms-2"></span>
+        </button>
+      </div>
+    </div>
+    <div id="apply-error" class="alert alert-danger mt-3 d-none"></div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+"use strict";
+const UPLOAD_ID = {{ upload_id | tojson }};
+
+// ── Select-all checkbox ────────────────────────────────────────
+const chkAll = document.getElementById("chk-all");
+if (chkAll) {
+  chkAll.addEventListener("change", () => {
+    document.querySelectorAll(".row-chk").forEach(c => c.checked = chkAll.checked);
+    updateApplyLabel();
+  });
+  document.querySelectorAll(".row-chk").forEach(c =>
+    c.addEventListener("change", updateApplyLabel)
+  );
+}
+
+function updateApplyLabel() {
+  const checked = document.querySelectorAll(".row-chk:checked").length;
+  document.getElementById("apply-label").textContent = `Apply ${checked} change${checked !== 1 ? "s" : ""}`;
+}
+updateApplyLabel();
+
+// ── Apply ─────────────────────────────────────────────────────
+document.getElementById("btn-apply").addEventListener("click", async () => {
+  const errEl = document.getElementById("apply-error");
+  errEl.classList.add("d-none");
+
+  const approvedIndices = [];
+  document.querySelectorAll(".row-chk:checked").forEach(c =>
+    approvedIndices.push(parseInt(c.dataset.index))
+  );
+
+  const conflictDecisions = {};
+  document.querySelectorAll(".conflict-decision:checked").forEach(r => {
+    conflictDecisions[r.dataset.index] = r.value;
+  });
+
+  document.getElementById("btn-apply").disabled = true;
+  document.getElementById("btn-apply-spin").classList.remove("d-none");
+  document.getElementById("btn-apply-text").textContent = "Applying…";
+  showLoading("Writing changes to Baserow…");
+
+  let resp, data;
+  try {
+    resp = await fetch("/api/import/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upload_id: UPLOAD_ID, approved_indices: approvedIndices, conflict_decisions: conflictDecisions }),
+    });
+    data = await resp.json();
+  } catch(e) {
+    hideLoading();
+    document.getElementById("btn-apply").disabled = false;
+    document.getElementById("btn-apply-spin").classList.add("d-none");
+    document.getElementById("btn-apply-text").textContent = "Apply Changes";
+    errEl.textContent = "Network error: " + e.message;
+    errEl.classList.remove("d-none");
+    return;
+  }
+  hideLoading();
+  if (!resp.ok) {
+    document.getElementById("btn-apply").disabled = false;
+    document.getElementById("btn-apply-spin").classList.add("d-none");
+    document.getElementById("btn-apply-text").textContent = "Apply Changes";
+    errEl.textContent = data.error || "Apply failed.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  window.location.href = data.redirect;
+});
+</script>
+{% endblock %}

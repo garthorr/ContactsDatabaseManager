@@ -1,10 +1,37 @@
+import json
 import os
 import time
+import uuid
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from werkzeug.utils import secure_filename
 
 import config as cfg
 from baserow_client import BaserowAuthError, BaserowAPIError, BaserowClient
+
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "/app/uploads")
+ALLOWED_EXTENSIONS = {".xlsx", ".xls", ".csv"}
+
+
+def _sidecar_path(upload_id: str) -> str:
+    return os.path.join(UPLOAD_FOLDER, f"{upload_id}.meta.json")
+
+
+def _load_sidecar(upload_id: str) -> dict:
+    path = _sidecar_path(upload_id)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _save_sidecar(upload_id: str, data: dict) -> None:
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    path = _sidecar_path(upload_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
@@ -49,14 +76,384 @@ def import_page():
     return render_template("upload.html")
 
 
+@app.route("/api/import/upload", methods=["POST"])
+def api_import_upload():
+    from import_engine import parse_file, detect_c10_mapping
+    if "file" not in request.files:
+        return jsonify(error="No file provided."), 400
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify(error="Empty filename."), 400
+    ext = os.path.splitext(f.filename)[1].lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return jsonify(error=f"Unsupported file type '{ext}'. Use .xlsx or .csv."), 400
+
+    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+    uid = str(uuid.uuid4())
+    safe_name = secure_filename(f.filename)
+    filepath = os.path.join(UPLOAD_FOLDER, f"{uid}_{safe_name}")
+    f.save(filepath)
+
+    try:
+        headers, rows = parse_file(filepath)
+    except Exception as e:
+        os.unlink(filepath)
+        return jsonify(error=f"Could not read file: {e}"), 400
+
+    suggested = detect_c10_mapping(headers)
+    _save_sidecar(uid, {
+        "upload_id": uid,
+        "filename": f.filename,
+        "filepath": filepath,
+        "headers": headers,
+        "rows": rows,
+    })
+    return jsonify(
+        upload_id=uid,
+        headers=headers,
+        row_count=len(rows),
+        suggested_mapping=suggested,
+    )
+
+
+@app.route("/api/import/analyze", methods=["POST"])
+def api_import_analyze():
+    from import_engine import run_diff
+    body = request.get_json(force=True) or {}
+    uid = body.get("upload_id")
+    if not uid:
+        return jsonify(error="upload_id required."), 400
+    sidecar = _load_sidecar(uid)
+    if not sidecar:
+        return jsonify(error="Upload not found. Please re-upload the file."), 404
+
+    mapping = body.get("mapping", {})
+    match_key = body.get("match_key", "Email")
+    custom_match_col = body.get("custom_match_col", "")
+
+    try:
+        results = run_diff(
+            sidecar["rows"], mapping, match_key, cfg.load_config(), custom_match_col
+        )
+    except Exception as e:
+        return jsonify(error=f"Analysis failed: {e}"), 500
+
+    summary = {"NEW": 0, "CLEAN_UPDATE": 0, "NEW_ADDITIONAL_POSITION": 0,
+               "STALE": 0, "NO_CHANGE": 0}
+    for r in results:
+        summary[r.status] = summary.get(r.status, 0) + 1
+
+    # Persist results in sidecar
+    sidecar["diff_results"] = [r.to_dict() for r in results]
+    sidecar["mapping"] = mapping
+    sidecar["match_key"] = match_key
+    sidecar["custom_match_col"] = custom_match_col
+    _save_sidecar(uid, sidecar)
+
+    return jsonify(summary=summary, redirect=f"/import/review/{uid}")
+
+
+@app.route("/api/import/apply", methods=["POST"])
+def api_import_apply():
+    from import_engine import apply_changes
+    import history as hist
+    body = request.get_json(force=True) or {}
+    uid = body.get("upload_id")
+    if not uid:
+        return jsonify(error="upload_id required."), 400
+    sidecar = _load_sidecar(uid)
+    if not sidecar:
+        return jsonify(error="Upload not found. Please re-upload."), 404
+    if sidecar.get("applied"):
+        return jsonify(error="This import has already been applied."), 409
+
+    diff_results_raw = sidecar.get("diff_results", [])
+    approved_indices = set(body.get("approved_indices", []))
+    conflict_decisions = body.get("conflict_decisions", {})
+
+    # Reconstruct minimal DiffResult-like dicts for apply_changes
+    from models import DiffResult, ImportRow, Contact, Assignment
+    approved = []
+    for i, r in enumerate(diff_results_raw):
+        if i not in approved_indices:
+            continue
+        # Rebuild lightweight DiffResult from stored dict
+        ec = None
+        if r.get("existing_contact"):
+            ec_d = r["existing_contact"]
+            ec = Contact(
+                email=ec_d.get("email", ""),
+                first_name=ec_d.get("first_name", ""),
+                last_name=ec_d.get("last_name", ""),
+                mobile=ec_d.get("mobile", ""),
+                street=ec_d.get("street", ""),
+                city=ec_d.get("city", ""),
+                zip_code=ec_d.get("zip_code", ""),
+                last_update=ec_d.get("last_update", ""),
+                source=ec_d.get("source", ""),
+                baserow_row_id=ec_d.get("baserow_row_id"),
+            )
+        existing_asns = [
+            Assignment(
+                contact_email=a.get("contact_email", ""),
+                unit_name=a.get("unit_name", ""),
+                position_name=a.get("position_name", ""),
+                baserow_row_id=a.get("baserow_row_id"),
+            )
+            for a in r.get("existing_assignments", [])
+        ]
+        dr = DiffResult(
+            row=ImportRow(raw=r.get("mapped", {}), mapped=r.get("mapped", {})),
+            status=r["status"],
+            existing_contact=ec,
+            existing_assignments=existing_asns,
+            field_changes=r.get("field_changes", {}),
+        )
+        approved.append(dr)
+
+    c = cfg.load_config()
+    try:
+        client = _make_client()
+        results = apply_changes(approved, conflict_decisions, c, client)
+    except Exception as e:
+        return jsonify(error=f"Apply failed: {e}"), 500
+
+    results["conflicts_reviewed"] = len([
+        i for i in approved_indices
+        if diff_results_raw[i]["status"] in ("NEW_ADDITIONAL_POSITION", "STALE")
+    ])
+
+    # Log to Import History
+    try:
+        hist.log_import(
+            client,
+            int(c["table_history"]),
+            sidecar.get("filename", ""),
+            results,
+            match_key=sidecar.get("match_key", ""),
+        )
+    except Exception as e:
+        results.setdefault("errors", []).append(f"History log failed: {e}")
+
+    # Save results and mark as applied
+    sidecar["applied"] = True
+    sidecar["results"] = {
+        "created": results.get("created", 0),
+        "updated": results.get("updated", 0),
+        "new_positions": results.get("new_positions", 0),
+        "skipped": results.get("skipped", 0),
+        "errors": [str(e) for e in results.get("errors", [])],
+    }
+    _save_sidecar(uid, sidecar)
+
+    return jsonify(results=sidecar["results"], redirect=f"/import/results/{uid}")
+
+
+@app.route("/import/results/<upload_id>")
+def import_results(upload_id):
+    sidecar = _load_sidecar(upload_id)
+    if not sidecar or "results" not in sidecar:
+        flash("Results not found.", "warning")
+        return redirect(url_for("import_page"))
+    return render_template(
+        "results.html",
+        filename=sidecar.get("filename", ""),
+        results=sidecar["results"],
+    )
+
+
+@app.route("/import/review/<upload_id>")
+def import_review(upload_id):
+    sidecar = _load_sidecar(upload_id)
+    if not sidecar or "diff_results" not in sidecar:
+        flash("Import session not found. Please re-upload.", "warning")
+        return redirect(url_for("import_page"))
+    results = sidecar["diff_results"]
+    summary = {"NEW": 0, "CLEAN_UPDATE": 0, "NEW_ADDITIONAL_POSITION": 0,
+               "STALE": 0, "NO_CHANGE": 0}
+    for r in results:
+        summary[r["status"]] = summary.get(r["status"], 0) + 1
+
+    # Build indexed lists for Jinja (needed for form field indexing)
+    auto_rows_indexed = [
+        (i, r) for i, r in enumerate(results)
+        if r["status"] in ("NEW", "CLEAN_UPDATE", "NEW_ADDITIONAL_POSITION")
+    ]
+    stale_rows_indexed = [
+        (i, r) for i, r in enumerate(results)
+        if r["status"] == "STALE"
+    ]
+    return render_template(
+        "review.html",
+        upload_id=upload_id,
+        filename=sidecar.get("filename", ""),
+        diff_results=results,
+        summary=summary,
+        auto_rows_indexed=auto_rows_indexed,
+        stale_rows_indexed=stale_rows_indexed,
+    )
+
+
 @app.route("/manual")
 def manual_page():
-    return render_template("manual_entry.html", units_list=[], positions_list=[])
+    try:
+        client = _make_client()
+        c = cfg.load_config()
+        unit_rows = client.get_all_rows(int(c["table_units"]))
+        pos_rows = client.get_all_rows(int(c["table_positions"]))
+        units_list = sorted([r.get("Unit Name", "") for r in unit_rows if r.get("Unit Name")])
+        positions_list = sorted([r.get("Position Name", "") for r in pos_rows if r.get("Position Name")])
+    except Exception:
+        units_list, positions_list = [], []
+    return render_template("manual_entry.html", units_list=units_list, positions_list=positions_list)
+
+
+@app.route("/api/manual/search")
+def api_manual_search():
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify(contacts=[])
+    c = cfg.load_config()
+    try:
+        client = _make_client()
+        # Search by email contains
+        resp_email = client.get_rows(
+            int(c["table_contacts"]),
+            params={"filter__Email__contains": q, "size": 20},
+        )
+        # Search by first+last name contains (Baserow doesn't support OR filters
+        # via simple params, so we do two searches and merge)
+        resp_name = client.get_rows(
+            int(c["table_contacts"]),
+            params={"search": q, "size": 20},
+        )
+        seen = set()
+        contacts = []
+        for row in (resp_email.get("results", []) + resp_name.get("results", [])):
+            rid = row.get("id")
+            if rid in seen:
+                continue
+            seen.add(rid)
+            # Fetch assignments for this contact
+            asn_resp = client.get_rows(
+                int(c["table_assignments"]),
+                params={
+                    "filter__Contact__link_row_has": row.get("Email", ""),
+                    "size": 50,
+                },
+            )
+            asns = []
+            for a in asn_resp.get("results", []):
+                unit_link = a.get("Unit", [])
+                pos_link = a.get("Position", [])
+                asns.append({
+                    "unit_name": unit_link[0]["value"] if (isinstance(unit_link, list) and unit_link) else "",
+                    "position_name": pos_link[0]["value"] if (isinstance(pos_link, list) and pos_link) else "",
+                    "row_id": a.get("id"),
+                })
+            contacts.append({
+                "row_id": rid,
+                "email": row.get("Email", ""),
+                "first_name": row.get("First Name", ""),
+                "last_name": row.get("Last Name", ""),
+                "mobile": row.get("Mobile", ""),
+                "street": row.get("Street", ""),
+                "city": row.get("City", ""),
+                "zip_code": row.get("Zip", ""),
+                "source": row.get("Source", ""),
+                "last_update": row.get("Last Update", ""),
+                "unsubscribed": row.get("Unsubscribed", False),
+                "assignments": asns,
+            })
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(contacts=contacts[:20])
+
+
+@app.route("/api/manual/save", methods=["POST"])
+def api_manual_save():
+    import history as hist
+    body = request.get_json(force=True) or {}
+    email = (body.get("email") or "").strip()
+    if not email:
+        return jsonify(error="Email is required."), 400
+
+    c = cfg.load_config()
+    try:
+        client = _make_client()
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    contact_payload = {
+        "Email": email,
+        "First Name": body.get("first_name", ""),
+        "Last Name": body.get("last_name", ""),
+        "Mobile": body.get("mobile", ""),
+        "Street": body.get("street", ""),
+        "City": body.get("city", ""),
+        "Zip": body.get("zip_code", ""),
+        "Source": body.get("source", ""),
+    }
+    if body.get("last_update"):
+        contact_payload["Last Update"] = body["last_update"]
+    if body.get("unsubscribed") is not None:
+        contact_payload["Unsubscribed"] = bool(body["unsubscribed"])
+
+    row_id = body.get("row_id")
+    try:
+        if row_id:
+            client.update_row(int(c["table_contacts"]), int(row_id), contact_payload)
+            new_row_id = int(row_id)
+        else:
+            created = client.create_row(int(c["table_contacts"]), contact_payload)
+            new_row_id = created["id"]
+    except Exception as e:
+        return jsonify(error=f"Could not save contact: {e}"), 500
+
+    # Handle assignments
+    errors = []
+    for asn in (body.get("assignments") or []):
+        unit = (asn.get("unit") or "").strip()
+        position = (asn.get("position") or "").strip()
+        if not unit and not position:
+            continue
+        try:
+            client.create_row(int(c["table_assignments"]), {
+                "Contact": [email],
+                "Unit": [unit] if unit else [],
+                "Position": [position] if position else [],
+                "Source": "Manual Entry",
+            })
+        except Exception as e:
+            errors.append(str(e))
+
+    # Log to history
+    try:
+        hist.log_import(
+            client, int(c["table_history"]),
+            f"Manual: {email}",
+            {"created": 0 if row_id else 1, "updated": 1 if row_id else 0,
+             "new_positions": len(body.get("assignments", [])), "skipped": 0, "errors": errors},
+            match_key="Email", source_format="Manual Entry",
+        )
+    except Exception:
+        pass
+
+    return jsonify(ok=True, row_id=new_row_id, errors=errors)
 
 
 @app.route("/history")
 def history_page():
-    return render_template("history.html", rows=[])
+    c = cfg.load_config()
+    rows = []
+    try:
+        client = _make_client()
+        all_rows = client.get_all_rows(int(c["table_history"]))
+        # Sort newest first by Import Date
+        rows = sorted(all_rows, key=lambda r: r.get("Import Date") or "", reverse=True)
+    except Exception:
+        pass
+    return render_template("history.html", rows=rows)
 
 
 # ------------------------------------------------------------------ #
@@ -306,6 +703,22 @@ def handle_exception(e):
     return redirect(url_for("index")), 302
 
 
+def _cleanup_old_uploads(max_age_hours: int = 24) -> None:
+    """Delete sidecar and upload files older than max_age_hours."""
+    import glob
+    cutoff = time.time() - (max_age_hours * 3600)
+    for path in glob.glob(os.path.join(UPLOAD_FOLDER, "*.meta.json")):
+        if os.path.getmtime(path) < cutoff:
+            try:
+                data = _load_sidecar(os.path.basename(path).replace(".meta.json", ""))
+                if data and data.get("filepath") and os.path.exists(data["filepath"]):
+                    os.unlink(data["filepath"])
+                os.unlink(path)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
+    _cleanup_old_uploads()
     debug = os.environ.get("FLASK_ENV") == "development"
     app.run(host="0.0.0.0", port=5000, debug=debug)
