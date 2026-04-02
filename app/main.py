@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from werkzeug.utils import secure_filename
@@ -55,6 +57,35 @@ def require_config():
         return
     if not cfg.is_configured():
         return redirect(url_for("setup_page"))
+
+
+def _extract_link_row_value(field_val) -> str:
+    """Extract the text value from a Baserow link_row field: [{id, value}, ...]."""
+    if isinstance(field_val, list) and field_val:
+        return field_val[0].get("value", "")
+    return ""
+
+
+def _tally_assignment_counts(asn_rows: list) -> tuple[dict, dict]:
+    """Return (pos_counts, unit_counts) dicts from a list of assignment rows."""
+    pos_counts: dict[str, int] = {}
+    unit_counts: dict[str, int] = {}
+    for a in asn_rows:
+        pname = _extract_link_row_value(a.get("Position", []))
+        if pname:
+            pos_counts[pname] = pos_counts.get(pname, 0) + 1
+        uname = _extract_link_row_value(a.get("Unit", []))
+        if uname:
+            unit_counts[uname] = unit_counts.get(uname, 0) + 1
+    return pos_counts, unit_counts
+
+
+def _build_diff_summary(statuses) -> dict:
+    summary = {"NEW": 0, "CLEAN_UPDATE": 0, "NEW_ADDITIONAL_POSITION": 0,
+               "STALE": 0, "NO_CHANGE": 0}
+    for s in statuses:
+        summary[s] = summary.get(s, 0) + 1
+    return summary
 
 
 def _make_client() -> BaserowClient:
@@ -138,10 +169,7 @@ def api_import_analyze():
     except Exception as e:
         return jsonify(error=f"Analysis failed: {e}"), 500
 
-    summary = {"NEW": 0, "CLEAN_UPDATE": 0, "NEW_ADDITIONAL_POSITION": 0,
-               "STALE": 0, "NO_CHANGE": 0}
-    for r in results:
-        summary[r.status] = summary.get(r.status, 0) + 1
+    summary = _build_diff_summary(r.status for r in results)
 
     # Persist results in sidecar
     sidecar["diff_results"] = [r.to_dict() for r in results]
@@ -171,37 +199,14 @@ def api_import_apply():
     approved_indices = set(body.get("approved_indices", []))
     conflict_decisions = body.get("conflict_decisions", {})
 
-    # Reconstruct minimal DiffResult-like dicts for apply_changes
+    # Reconstruct DiffResult objects for apply_changes
     from models import DiffResult, ImportRow, Contact, Assignment
     approved = []
     for i, r in enumerate(diff_results_raw):
         if i not in approved_indices:
             continue
-        # Rebuild lightweight DiffResult from stored dict
-        ec = None
-        if r.get("existing_contact"):
-            ec_d = r["existing_contact"]
-            ec = Contact(
-                email=ec_d.get("email", ""),
-                first_name=ec_d.get("first_name", ""),
-                last_name=ec_d.get("last_name", ""),
-                mobile=ec_d.get("mobile", ""),
-                street=ec_d.get("street", ""),
-                city=ec_d.get("city", ""),
-                zip_code=ec_d.get("zip_code", ""),
-                last_update=ec_d.get("last_update", ""),
-                source=ec_d.get("source", ""),
-                baserow_row_id=ec_d.get("baserow_row_id"),
-            )
-        existing_asns = [
-            Assignment(
-                contact_email=a.get("contact_email", ""),
-                unit_name=a.get("unit_name", ""),
-                position_name=a.get("position_name", ""),
-                baserow_row_id=a.get("baserow_row_id"),
-            )
-            for a in r.get("existing_assignments", [])
-        ]
+        ec = Contact.from_dict(r["existing_contact"]) if r.get("existing_contact") else None
+        existing_asns = [Assignment.from_dict(a) for a in r.get("existing_assignments", [])]
         dr = DiffResult(
             row=ImportRow(raw=r.get("mapped", {}), mapped=r.get("mapped", {})),
             status=r["status"],
@@ -269,10 +274,7 @@ def import_review(upload_id):
         flash("Import session not found. Please re-upload.", "warning")
         return redirect(url_for("import_page"))
     results = sidecar["diff_results"]
-    summary = {"NEW": 0, "CLEAN_UPDATE": 0, "NEW_ADDITIONAL_POSITION": 0,
-               "STALE": 0, "NO_CHANGE": 0}
-    for r in results:
-        summary[r["status"]] = summary.get(r["status"], 0) + 1
+    summary = _build_diff_summary(r["status"] for r in results)
 
     # Build indexed lists for Jinja (needed for form field indexing)
     auto_rows_indexed = [
@@ -303,7 +305,8 @@ def manual_page():
         pos_rows = client.get_all_rows(int(c["table_positions"]))
         units_list = sorted([r.get("Unit Name", "") for r in unit_rows if r.get("Unit Name")])
         positions_list = sorted([r.get("Position Name", "") for r in pos_rows if r.get("Position Name")])
-    except Exception:
+    except Exception as e:
+        app.logger.warning("manual_page: could not load units/positions: %s", e)
         units_list, positions_list = [], []
     return render_template("manual_entry.html", units_list=units_list, positions_list=positions_list)
 
@@ -316,43 +319,51 @@ def api_manual_search():
     c = cfg.load_config()
     try:
         client = _make_client()
-        # Search by email contains
-        resp_email = client.get_rows(
-            int(c["table_contacts"]),
-            params={"filter__Email__contains": q, "size": 20},
-        )
-        # Search by first+last name contains (Baserow doesn't support OR filters
-        # via simple params, so we do two searches and merge)
-        resp_name = client.get_rows(
-            int(c["table_contacts"]),
-            params={"search": q, "size": 20},
-        )
+        table_contacts = int(c["table_contacts"])
+        table_assignments = int(c["table_assignments"])
+
+        # Run email-filter and full-text search in parallel (Baserow has no OR filter)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_email = pool.submit(client.get_rows, table_contacts,
+                                  {"filter__Email__contains": q, "size": 20})
+            f_name  = pool.submit(client.get_rows, table_contacts,
+                                  {"search": q, "size": 20})
+            resp_email = f_email.result()
+            resp_name  = f_name.result()
+
+        # Deduplicate while preserving order
         seen = set()
-        contacts = []
+        unique_rows = []
         for row in (resp_email.get("results", []) + resp_name.get("results", [])):
             rid = row.get("id")
-            if rid in seen:
-                continue
-            seen.add(rid)
-            # Fetch assignments for this contact
-            asn_resp = client.get_rows(
-                int(c["table_assignments"]),
-                params={
-                    "filter__Contact__link_row_has": row.get("Email", ""),
-                    "size": 50,
-                },
+            if rid not in seen:
+                seen.add(rid)
+                unique_rows.append(row)
+        unique_rows = unique_rows[:20]
+
+        # Fetch assignments for all result contacts in parallel
+        def fetch_asns(row):
+            resp = client.get_rows(
+                table_assignments,
+                {"filter__Contact__link_row_has": row.get("Email", ""), "size": 50},
             )
-            asns = []
-            for a in asn_resp.get("results", []):
-                unit_link = a.get("Unit", [])
-                pos_link = a.get("Position", [])
-                asns.append({
-                    "unit_name": unit_link[0]["value"] if (isinstance(unit_link, list) and unit_link) else "",
-                    "position_name": pos_link[0]["value"] if (isinstance(pos_link, list) and pos_link) else "",
+            return row, resp.get("results", [])
+
+        with ThreadPoolExecutor(max_workers=min(len(unique_rows), 5)) as pool:
+            asn_results = list(pool.map(fetch_asns, unique_rows))
+
+        contacts = []
+        for row, asn_rows in asn_results:
+            asns = [
+                {
+                    "unit_name": _extract_link_row_value(a.get("Unit", [])),
+                    "position_name": _extract_link_row_value(a.get("Position", [])),
                     "row_id": a.get("id"),
-                })
+                }
+                for a in asn_rows
+            ]
             contacts.append({
-                "row_id": rid,
+                "row_id": row.get("id"),
                 "email": row.get("Email", ""),
                 "first_name": row.get("First Name", ""),
                 "last_name": row.get("Last Name", ""),
@@ -364,10 +375,11 @@ def api_manual_search():
                 "last_update": row.get("Last Update", ""),
                 "unsubscribed": row.get("Unsubscribed", False),
                 "assignments": asns,
+                "_raw_row": {k: v for k, v in row.items() if k != "id"},
             })
     except Exception as e:
         return jsonify(error=str(e)), 500
-    return jsonify(contacts=contacts[:20])
+    return jsonify(contacts=contacts)
 
 
 @app.route("/api/manual/save", methods=["POST"])
@@ -436,8 +448,8 @@ def api_manual_save():
              "new_positions": len(body.get("assignments", [])), "skipped": 0, "errors": errors},
             match_key="Email", source_format="Manual Entry",
         )
-    except Exception:
-        pass
+    except Exception as e:
+        app.logger.warning("History log failed (manual save): %s", e)
 
     return jsonify(ok=True, row_id=new_row_id, errors=errors)
 
@@ -455,23 +467,14 @@ def validate_page():
 
         # Fetch all assignments once and tally counts
         asn_rows = client.get_all_rows(int(c["table_assignments"]))
-        pos_counts: dict[str, int] = {}
-        unit_counts: dict[str, int] = {}
-        for a in asn_rows:
-            pos_link = a.get("Position", [])
-            if isinstance(pos_link, list) and pos_link:
-                pname = pos_link[0].get("value", "")
-                pos_counts[pname] = pos_counts.get(pname, 0) + 1
-            unit_link = a.get("Unit", [])
-            if isinstance(unit_link, list) and unit_link:
-                uname = unit_link[0].get("value", "")
-                unit_counts[uname] = unit_counts.get(uname, 0) + 1
+        pos_counts, unit_counts = _tally_assignment_counts(asn_rows)
 
         positions = sorted([
             {
                 "name": r.get("Position Name", ""),
                 "row_id": r.get("id"),
                 "assignment_count": pos_counts.get(r.get("Position Name", ""), 0),
+                "raw": {k: v for k, v in r.items() if k != "id"},
             }
             for r in pos_rows if r.get("Position Name")
         ], key=lambda x: x["name"].lower())
@@ -481,6 +484,7 @@ def validate_page():
                 "name": r.get("Unit Name", ""),
                 "row_id": r.get("id"),
                 "assignment_count": unit_counts.get(r.get("Unit Name", ""), 0),
+                "raw": {k: v for k, v in r.items() if k != "id"},
             }
             for r in unit_rows if r.get("Unit Name")
         ], key=lambda x: x["name"].lower())
@@ -507,18 +511,7 @@ def api_validate_export():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
-    # Tally counts
-    pos_counts: dict[str, int] = {}
-    unit_counts: dict[str, int] = {}
-    for a in asn_rows:
-        pos_link = a.get("Position", [])
-        if isinstance(pos_link, list) and pos_link:
-            pname = pos_link[0].get("value", "")
-            pos_counts[pname] = pos_counts.get(pname, 0) + 1
-        unit_link = a.get("Unit", [])
-        if isinstance(unit_link, list) and unit_link:
-            uname = unit_link[0].get("value", "")
-            unit_counts[uname] = unit_counts.get(uname, 0) + 1
+    pos_counts, unit_counts = _tally_assignment_counts(asn_rows)
 
     buf = io.StringIO()
     writer = csv.writer(buf)
@@ -559,6 +552,97 @@ def history_page():
     except Exception:
         pass
     return render_template("history.html", rows=rows)
+
+
+# ------------------------------------------------------------------ #
+# Generic file upload proxy + dynamic field/row endpoints
+# ------------------------------------------------------------------ #
+
+# Field types the app knows how to render as editable inputs.
+# Everything else (link_row, formula, rollup, etc.) is skipped.
+_EDITABLE_FIELD_TYPES = {
+    "text", "long_text", "number", "boolean", "date",
+    "url", "email", "phone_number", "file",
+    "single_select", "multiple_select", "rating",
+}
+
+_TABLE_KEY_MAP = {
+    "contacts":    "table_contacts",
+    "units":       "table_units",
+    "positions":   "table_positions",
+    "assignments": "table_assignments",
+}
+
+
+@app.route("/api/files/upload", methods=["POST"])
+def api_files_upload():
+    """Proxy a file upload to Baserow's user-files endpoint."""
+    if "file" not in request.files:
+        return jsonify(error="No file provided."), 400
+    f = request.files["file"]
+    mime = f.mimetype or "application/octet-stream"
+    try:
+        client = _make_client()
+        result = client.upload_file(f.stream, f.filename, mime)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(result)
+
+
+@app.route("/api/table-fields/<table_key>")
+def api_table_fields(table_key):
+    """
+    Return editable field definitions for a table.
+    Skips primary field, link_row, formula, and other uneditable types.
+    """
+    cfg_key = _TABLE_KEY_MAP.get(table_key)
+    if not cfg_key:
+        return jsonify(error=f"Unknown table key: {table_key}"), 400
+    c = cfg.load_config()
+    table_id = c.get(cfg_key)
+    if not table_id:
+        return jsonify(error="Table not configured."), 400
+    try:
+        client = _make_client()
+        fields = client.get_fields(int(table_id))
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+    editable = [
+        {
+            "id":      f["id"],
+            "name":    f["name"],
+            "type":    f["type"],
+            "primary": f.get("primary", False),
+            # single_select / multiple_select options
+            "options": [
+                {"id": o["id"], "value": o["value"], "color": o.get("color", "")}
+                for o in f.get("select_options", [])
+            ],
+        }
+        for f in fields
+        if f["type"] in _EDITABLE_FIELD_TYPES
+    ]
+    return jsonify(fields=editable)
+
+
+@app.route("/api/table-row/<table_key>/<int:row_id>", methods=["PATCH"])
+def api_table_row_update(table_key, row_id):
+    """Update a single row in any configured table."""
+    cfg_key = _TABLE_KEY_MAP.get(table_key)
+    if not cfg_key:
+        return jsonify(error=f"Unknown table key: {table_key}"), 400
+    c = cfg.load_config()
+    table_id = c.get(cfg_key)
+    if not table_id:
+        return jsonify(error="Table not configured."), 400
+    body = request.get_json(force=True) or {}
+    try:
+        client = _make_client()
+        updated = client.update_row(int(table_id), row_id, body)
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+    return jsonify(updated)
 
 
 # ------------------------------------------------------------------ #
@@ -816,14 +900,19 @@ def _cleanup_old_uploads(max_age_hours: int = 24) -> None:
         if os.path.getmtime(path) < cutoff:
             try:
                 data = _load_sidecar(os.path.basename(path).replace(".meta.json", ""))
-                if data and data.get("filepath") and os.path.exists(data["filepath"]):
-                    os.unlink(data["filepath"])
+                if data and data.get("filepath"):
+                    try:
+                        os.unlink(data["filepath"])
+                    except FileNotFoundError:
+                        pass
                 os.unlink(path)
-            except Exception:
-                pass
+            except Exception as e:
+                app.logger.warning("Cleanup error for %s: %s", path, e)
 
+
+# Run cleanup at startup so stale files are purged whether run via WSGI or directly
+_cleanup_old_uploads()
 
 if __name__ == "__main__":
-    _cleanup_old_uploads()
     debug = os.environ.get("FLASK_ENV") == "development"
     app.run(host="0.0.0.0", port=5000, debug=debug)

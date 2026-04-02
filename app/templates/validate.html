@@ -88,6 +88,7 @@
                 <th class="sortable" data-col="0">Position Name <span class="sort-icon text-muted">↕</span></th>
                 <th class="sortable text-end" data-col="1">Assignments <span class="sort-icon text-muted">↕</span></th>
                 <th>Baserow ID</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -103,6 +104,13 @@
                 </td>
                 <td class="text-end">{{ p.assignment_count }}</td>
                 <td class="text-muted small">{{ p.row_id }}</td>
+                <td>
+                  <button class="btn btn-outline-secondary btn-xs py-0 px-1 edit-row-btn"
+                          data-table="positions"
+                          data-row-id="{{ p.row_id }}"
+                          data-row='{{ p.raw | tojson | e }}'
+                          title="Edit">✎</button>
+                </td>
               </tr>
               {% endfor %}
             </tbody>
@@ -128,6 +136,7 @@
                 <th class="sortable" data-col="0">Unit Name <span class="sort-icon text-muted">↕</span></th>
                 <th class="sortable text-end" data-col="1">Assignments <span class="sort-icon text-muted">↕</span></th>
                 <th>Baserow ID</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -143,6 +152,13 @@
                 </td>
                 <td class="text-end">{{ u.assignment_count }}</td>
                 <td class="text-muted small">{{ u.row_id }}</td>
+                <td>
+                  <button class="btn btn-outline-secondary btn-xs py-0 px-1 edit-row-btn"
+                          data-table="units"
+                          data-row-id="{{ u.row_id }}"
+                          data-row='{{ u.raw | tojson | e }}'
+                          title="Edit">✎</button>
+                </td>
               </tr>
               {% endfor %}
             </tbody>
@@ -151,6 +167,31 @@
         <p class="text-muted small mt-1" id="unit-count-label"></p>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit modal ───────────────────────────────────────────────────── -->
+<div class="modal fade" id="editModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="edit-modal-title">Edit Row</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="edit-modal-body">
+        <div class="text-center py-4">
+          <div class="spinner-border text-primary"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <div id="edit-modal-error" class="text-danger small me-auto d-none"></div>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="btn-edit-save">
+          <span id="edit-save-text">Save</span>
+          <span id="edit-save-spin" class="spinner-border spinner-border-sm d-none ms-1"></span>
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -219,5 +260,224 @@ initTable("unit-table", "unit-search", "unit-unused-only", "unit-row", "unit-cou
 
 // Make sort headers look clickable
 document.querySelectorAll("th.sortable").forEach(h => h.style.cursor = "pointer");
+
+// ── Edit modal ────────────────────────────────────────────────────────────
+const editModal   = new bootstrap.Modal(document.getElementById("editModal"));
+let _editTable    = null;   // "positions" | "units"
+let _editRowId    = null;
+let _editFields   = [];     // field definitions fetched from server
+// Map of fieldName → [{name: "baserow_file_name", url: "...", ...}] for staged files
+const _stagedFiles = {};
+
+document.querySelectorAll(".edit-row-btn").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    _editTable  = btn.dataset.table;
+    _editRowId  = parseInt(btn.dataset.rowId);
+    const rowData = JSON.parse(btn.dataset.row || "{}");
+    Object.keys(_stagedFiles).forEach(k => delete _stagedFiles[k]);
+
+    document.getElementById("edit-modal-title").textContent =
+      `Edit ${_editTable === "positions" ? "Position" : "Unit"} — row ${_editRowId}`;
+    document.getElementById("edit-modal-body").innerHTML =
+      '<div class="text-center py-4"><div class="spinner-border text-primary"></div></div>';
+    document.getElementById("edit-modal-error").classList.add("d-none");
+    editModal.show();
+
+    // Fetch field definitions
+    const r = await fetch(`/api/table-fields/${_editTable}`);
+    const data = await r.json();
+    if (!r.ok) {
+      document.getElementById("edit-modal-body").innerHTML =
+        `<div class="alert alert-danger">${data.error}</div>`;
+      return;
+    }
+    _editFields = data.fields;
+    renderEditForm(_editFields, rowData);
+  });
+});
+
+function renderEditForm(fields, rowData) {
+  const body = document.getElementById("edit-modal-body");
+  if (!fields.length) {
+    body.innerHTML = '<p class="text-muted">No editable fields found for this table.</p>';
+    return;
+  }
+  let html = '<div class="row g-3">';
+  fields.forEach(f => {
+    if (f.primary) return;   // primary field displayed as title, skip inline edit
+    const val = rowData[f.name] ?? "";
+    html += `<div class="col-12 col-md-6" id="field-wrap-${f.id}">`;
+    html += `<label class="form-label small fw-semibold">${f.name}</label>`;
+    html += renderFieldInput(f, val);
+    html += `</div>`;
+  });
+  html += "</div>";
+  body.innerHTML = html;
+
+  // Wire file input change handlers after DOM insertion
+  fields.filter(f => f.type === "file").forEach(f => {
+    document.getElementById(`file-input-${f.id}`)
+      ?.addEventListener("change", e => handleFileStage(f, e.target.files[0]));
+  });
+}
+
+function renderFieldInput(field, currentVal) {
+  const id = `edit-field-${field.id}`;
+  switch (field.type) {
+    case "text":
+    case "url":
+    case "email":
+    case "phone_number":
+      return `<input type="text" class="form-control form-control-sm" id="${id}"
+                     value="${esc(String(currentVal))}">`;
+    case "long_text":
+      return `<textarea class="form-control form-control-sm" id="${id}" rows="3">${esc(String(currentVal))}</textarea>`;
+    case "number":
+    case "rating":
+      return `<input type="number" class="form-control form-control-sm" id="${id}"
+                     value="${esc(String(currentVal))}">`;
+    case "boolean":
+      return `<div class="form-check mt-1">
+                <input type="checkbox" class="form-check-input" id="${id}"
+                       ${currentVal ? "checked" : ""}>
+              </div>`;
+    case "date":
+      const dateVal = currentVal ? String(currentVal).substring(0, 10) : "";
+      return `<input type="date" class="form-control form-control-sm" id="${id}"
+                     value="${dateVal}">`;
+    case "single_select": {
+      const opts = field.options.map(o =>
+        `<option value="${esc(o.value)}" ${currentVal?.value === o.value ? "selected" : ""}>${esc(o.value)}</option>`
+      ).join("");
+      return `<select class="form-select form-select-sm" id="${id}">
+                <option value="">—</option>${opts}</select>`;
+    }
+    case "multiple_select": {
+      const selected = Array.isArray(currentVal) ? currentVal.map(v => v.value) : [];
+      const opts = field.options.map(o =>
+        `<option value="${esc(o.value)}" ${selected.includes(o.value) ? "selected" : ""}>${esc(o.value)}</option>`
+      ).join("");
+      return `<select class="form-select form-select-sm" id="${id}" multiple size="4">${opts}</select>`;
+    }
+    case "file":
+      return renderFileWidget(field, currentVal);
+    default:
+      return `<input type="text" class="form-control form-control-sm" id="${id}"
+                     value="${esc(String(currentVal))}">`;
+  }
+}
+
+function renderFileWidget(field, currentVal) {
+  const files = Array.isArray(currentVal) ? currentVal : [];
+  let preview = "";
+  if (files.length) {
+    preview = files.map(f => {
+      if (f.is_image) {
+        const thumb = f.thumbnails?.small?.url || f.url;
+        return `<a href="${f.url}" target="_blank" class="me-2">
+                  <img src="${thumb}" style="max-height:60px;border-radius:4px;" title="${esc(f.visible_name || f.name)}">
+                </a>`;
+      }
+      return `<a href="${f.url}" target="_blank" class="badge bg-secondary me-1 text-decoration-none">
+                ${esc(f.visible_name || f.name)}
+              </a>`;
+    }).join("");
+    preview = `<div class="mb-2 d-flex flex-wrap align-items-center gap-1" id="file-preview-${field.id}">${preview}</div>`;
+  }
+  return `${preview}
+    <div class="d-flex align-items-center gap-2">
+      <input type="file" class="form-control form-control-sm" id="file-input-${field.id}" accept="*/*">
+      <span id="file-status-${field.id}" class="small text-muted"></span>
+    </div>`;
+}
+
+async function handleFileStage(field, file) {
+  if (!file) return;
+  const statusEl = document.getElementById(`file-status-${field.id}`);
+  statusEl.textContent = "Uploading…";
+  statusEl.className = "small text-muted";
+
+  const fd = new FormData();
+  fd.append("file", file);
+  try {
+    const resp = await fetch("/api/files/upload", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "Upload failed");
+    _stagedFiles[field.name] = data;
+    statusEl.textContent = `✓ ${data.visible_name || data.name}`;
+    statusEl.className = "small text-success";
+    // Show inline preview for images
+    if (data.is_image) {
+      const thumb = data.thumbnails?.small?.url || data.url;
+      let previewEl = document.getElementById(`file-preview-${field.id}`);
+      if (!previewEl) {
+        previewEl = document.createElement("div");
+        previewEl.id = `file-preview-${field.id}`;
+        previewEl.className = "mb-2 d-flex flex-wrap align-items-center gap-1";
+        document.getElementById(`file-input-${field.id}`).before(previewEl);
+      }
+      previewEl.innerHTML = `<a href="${data.url}" target="_blank">
+        <img src="${thumb}" style="max-height:60px;border-radius:4px;" title="${esc(data.name)}"></a>`;
+    }
+  } catch(e) {
+    statusEl.textContent = `✗ ${e.message}`;
+    statusEl.className = "small text-danger";
+  }
+}
+
+function collectEditPayload() {
+  const payload = {};
+  _editFields.forEach(f => {
+    if (f.primary) return;
+    if (f.type === "file") {
+      // If a new file was staged for this field, use it; otherwise leave field untouched
+      if (_stagedFiles[f.name] !== undefined) {
+        payload[f.name] = [{ name: _stagedFiles[f.name].name }];
+      }
+      return;
+    }
+    const el = document.getElementById(`edit-field-${f.id}`);
+    if (!el) return;
+    if (f.type === "boolean") {
+      payload[f.name] = el.checked;
+    } else if (f.type === "number" || f.type === "rating") {
+      payload[f.name] = el.value === "" ? null : Number(el.value);
+    } else if (f.type === "multiple_select") {
+      payload[f.name] = Array.from(el.selectedOptions).map(o => o.value).filter(Boolean);
+    } else {
+      payload[f.name] = el.value;
+    }
+  });
+  return payload;
+}
+
+document.getElementById("btn-edit-save").addEventListener("click", async () => {
+  const errEl = document.getElementById("edit-modal-error");
+  errEl.classList.add("d-none");
+  document.getElementById("btn-edit-save").disabled = true;
+  document.getElementById("edit-save-spin").classList.remove("d-none");
+  document.getElementById("edit-save-text").textContent = "Saving…";
+
+  const payload = collectEditPayload();
+  const r = await fetch(`/api/table-row/${_editTable}/${_editRowId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await r.json();
+  document.getElementById("btn-edit-save").disabled = false;
+  document.getElementById("edit-save-spin").classList.add("d-none");
+  document.getElementById("edit-save-text").textContent = "Save";
+  if (!r.ok) {
+    errEl.textContent = data.error || "Save failed.";
+    errEl.classList.remove("d-none");
+    return;
+  }
+  editModal.hide();
+  showToast("Saved successfully.", "success");
+  // Reload page after a short delay so the table reflects any name changes
+  setTimeout(() => location.reload(), 800);
+});
+
 </script>
 {% endblock %}

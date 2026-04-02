@@ -16,6 +16,22 @@ class Contact:
     source: str = ""
     baserow_row_id: Optional[int] = None
 
+    @staticmethod
+    def from_dict(d: dict) -> "Contact":
+        return Contact(
+            email=d.get("email", ""),
+            first_name=d.get("first_name", ""),
+            last_name=d.get("last_name", ""),
+            mobile=d.get("mobile", ""),
+            street=d.get("street", ""),
+            city=d.get("city", ""),
+            zip_code=d.get("zip_code", ""),
+            unsubscribed=d.get("unsubscribed", False),
+            last_update=d.get("last_update", ""),
+            source=d.get("source", ""),
+            baserow_row_id=d.get("baserow_row_id"),
+        )
+
 
 @dataclass
 class Unit:
@@ -41,14 +57,20 @@ class Assignment:
     last_update: str = ""
     baserow_row_id: Optional[int] = None
 
+    @staticmethod
+    def from_dict(d: dict) -> "Assignment":
+        return Assignment(
+            contact_email=d.get("contact_email", ""),
+            unit_name=d.get("unit_name", ""),
+            position_name=d.get("position_name", ""),
+            baserow_row_id=d.get("baserow_row_id"),
+        )
+
 
 @dataclass
 class ImportRow:
     raw: dict
     mapped: dict
-    contact: Optional[Contact] = None
-    unit: str = ""
-    position: str = ""
 
 
 @dataclass

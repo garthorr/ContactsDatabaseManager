@@ -81,17 +81,18 @@ class BaserowClient:
     # Meta endpoints
     # ------------------------------------------------------------------ #
 
-    def get_applications(self) -> list[dict]:
-        data = self._request("GET", "/api/applications/")
+    @staticmethod
+    def _list(data) -> list[dict]:
         return data if isinstance(data, list) else data.get("results", data)
+
+    def get_applications(self) -> list[dict]:
+        return self._list(self._request("GET", "/api/applications/"))
 
     def get_tables(self, database_id: int) -> list[dict]:
-        data = self._request("GET", f"/api/database/tables/database/{database_id}/")
-        return data if isinstance(data, list) else data.get("results", data)
+        return self._list(self._request("GET", f"/api/database/tables/database/{database_id}/"))
 
     def get_fields(self, table_id: int) -> list[dict]:
-        data = self._request("GET", f"/api/database/fields/table/{table_id}/")
-        return data if isinstance(data, list) else data.get("results", data)
+        return self._list(self._request("GET", f"/api/database/fields/table/{table_id}/"))
 
     # ------------------------------------------------------------------ #
     # Row endpoints
@@ -152,6 +153,37 @@ class BaserowClient:
             )
             created.extend(resp.get("items", []))
         return created
+
+    def upload_file(self, file_stream, filename: str, mime_type: str) -> dict:
+        """
+        Upload a file to Baserow via POST /api/user-files/upload-file/.
+        Returns the file object dict (name, url, is_image, thumbnails, …).
+        Uses the session directly (not _request) because this is multipart, not JSON.
+        Retries once on 401 like _request does.
+        """
+        url = f"{self.base_url}/api/user-files/upload-file/"
+        headers = {"Authorization": f"JWT {self.token}"}
+
+        def _do_upload():
+            file_stream.seek(0)
+            return self._session.post(
+                url,
+                headers=headers,
+                files={"file": (filename, file_stream, mime_type)},
+                timeout=60,
+            )
+
+        resp = _do_upload()
+        if resp.status_code == 401:
+            self._refresh_token()
+            headers["Authorization"] = f"JWT {self.token}"
+            resp = _do_upload()
+        if not resp.ok:
+            raise BaserowAPIError(
+                f"File upload failed ({resp.status_code}): {resp.text}",
+                status_code=resp.status_code,
+            )
+        return resp.json()
 
     # ------------------------------------------------------------------ #
     # Schema management
